@@ -14,6 +14,54 @@ app.use(express.static(path.join(__dirname)));
 let rooms = {};
 let rankings = {};
 const RANKINGS_FILE = path.join(__dirname, 'rankings.json');
+const DIGIT_COUNT = 4;
+
+function normalizeDigits(value) {
+    if (!Array.isArray(value)) return [];
+    return value.map(Number).filter(Number.isInteger);
+}
+
+function isValidDigits(value) {
+    const digits = normalizeDigits(value);
+    return digits.length === DIGIT_COUNT && new Set(digits).size === DIGIT_COUNT && digits.every(digit => digit >= 0 && digit <= 9);
+}
+
+function calculateScore(guess, secret) {
+    const guessDigits = normalizeDigits(guess);
+    const secretDigits = normalizeDigits(secret);
+    let strikes = 0;
+    let balls = 0;
+
+    guessDigits.forEach((digit, index) => {
+        if (digit === secretDigits[index]) {
+            strikes++;
+        } else if (secretDigits.includes(digit)) {
+            balls++;
+        }
+    });
+
+    return { strikes, balls };
+}
+
+function buildPublicRoomState(roomState, role) {
+    const filteredSecrets = {
+        host: (roomState.status !== 'finished' && role === 'guest' && roomState.secrets.host.length > 0) ? [] : roomState.secrets.host,
+        guest: (roomState.status !== 'finished' && role === 'host' && roomState.secrets.guest.length > 0) ? [] : roomState.secrets.guest
+    };
+
+    return {
+        code: roomState.code,
+        status: roomState.status,
+        host: roomState.host,
+        guest: roomState.guest,
+        currentTurn: roomState.currentTurn,
+        guesses: roomState.guesses,
+        winner: roomState.winner,
+        reason: roomState.reason,
+        turnStartedAt: roomState.turnStartedAt,
+        secrets: filteredSecrets
+    };
+}
 
 // Load rankings from file on startup
 if (fs.existsSync(RANKINGS_FILE)) {
@@ -104,7 +152,7 @@ app.post('/api/join', (req, res) => {
     roomState.status = 'setup';
 
     console.log(`[API] Player Joined: ${guestName} entered room ${room}`);
-    res.json(roomState);
+    res.json(buildPublicRoomState(roomState, 'guest'));
 });
 
 // 3. Set Ready / Secret submit
@@ -116,7 +164,14 @@ app.post('/api/ready', (req, res) => {
         return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
     }
 
-    roomState.secrets[role] = secret;
+    if (!['host', 'guest'].includes(role) || !roomState[role]) {
+        return res.status(400).json({ error: 'Invalid player role' });
+    }
+    if (!isValidDigits(secret)) {
+        return res.status(400).json({ error: 'Secret must be 4 unique digits' });
+    }
+
+    roomState.secrets[role] = normalizeDigits(secret);
     roomState[role].status = 'ready';
 
     // If both host and guest submitted secrets, start the match!
@@ -126,22 +181,43 @@ app.post('/api/ready', (req, res) => {
         console.log(`[API] Room ${room} - Match started playing!`);
     }
 
-    res.json(roomState);
+    res.json(buildPublicRoomState(roomState, role));
 });
 
 // 4. Submit Turn Guess
 app.post('/api/guess', (req, res) => {
-    const { room, role, guess, strikes, balls, attempt } = req.body;
+    const { room, role, guess } = req.body;
     const roomState = rooms[room];
 
     if (!roomState) {
         return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
     }
 
-    const guessObj = { guess, strikes, balls, attempt };
+    if (roomState.status !== 'playing') {
+        return res.status(400).json({ error: 'Game is not in progress' });
+    }
+    if (!['host', 'guest'].includes(role) || !roomState[role]) {
+        return res.status(400).json({ error: 'Invalid player role' });
+    }
+    if (roomState.currentTurn !== role) {
+        return res.status(409).json({ error: 'Not your turn' });
+    }
+    if (!isValidDigits(guess)) {
+        return res.status(400).json({ error: 'Guess must be 4 unique digits' });
+    }
+
+    const opponentRole = role === 'host' ? 'guest' : 'host';
+    const opponentSecret = roomState.secrets[opponentRole];
+    if (!isValidDigits(opponentSecret)) {
+        return res.status(400).json({ error: 'Opponent secret is not ready' });
+    }
+
+    const { strikes, balls } = calculateScore(guess, opponentSecret);
+    const attempt = roomState.guesses[role].length + 1;
+    const guessObj = { guess: normalizeDigits(guess), strikes, balls, attempt };
     roomState.guesses[role].push(guessObj);
 
-    if (strikes === 4) {
+    if (strikes === DIGIT_COUNT) {
         roomState.status = 'finished';
         roomState.winner = role;
         roomState.reason = 'win';
@@ -151,7 +227,7 @@ app.post('/api/guess', (req, res) => {
         roomState.turnStartedAt = Date.now();
     }
 
-    res.json(roomState);
+    res.json(buildPublicRoomState(roomState, role));
 });
 
 // 5. Poll Room State
@@ -172,24 +248,7 @@ app.get('/api/poll', (req, res) => {
         }
     }
 
-    // Strip real opponent secrets to prevent client-side inspect cheating
-    const filteredSecrets = {
-        host: (roomState.secrets.host.length > 0 && role === 'guest') ? [9, 9, 9, 9] : roomState.secrets.host,
-        guest: (roomState.secrets.guest.length > 0 && role === 'host') ? [9, 9, 9, 9] : roomState.secrets.guest
-    };
-
-    res.json({
-        code: roomState.code,
-        status: roomState.status,
-        host: roomState.host,
-        guest: roomState.guest,
-        currentTurn: roomState.currentTurn,
-        guesses: roomState.guesses,
-        winner: roomState.winner,
-        reason: roomState.reason,
-        turnStartedAt: roomState.turnStartedAt,
-        secrets: filteredSecrets
-    });
+    res.json(buildPublicRoomState(roomState, role));
 });
 
 // 6. Get Public Rooms List

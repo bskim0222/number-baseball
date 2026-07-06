@@ -83,47 +83,6 @@ const resultSecret = document.getElementById('result-secret');
 const resultAttempts = document.getElementById('result-attempts');
 const btnRestart = document.getElementById('btn-restart');
 
-function hydrateRulesModal() {
-    if (!rulesModal) return;
-
-    const title = rulesModal.querySelector('.modal-header h2');
-    const body = rulesModal.querySelector('.modal-body');
-
-    if (title) {
-        title.innerHTML = '<i class="fa-solid fa-book-open"></i> 게임 방법';
-    }
-
-    if (body) {
-        body.innerHTML = `
-            <p class="modal-desc">상대가 정한 <strong>서로 다른 4자리 숫자</strong>를 먼저 맞히면 승리합니다.</p>
-            <div class="rules-box">
-                <div class="rule-item">
-                    <span class="badge strike">S</span>
-                    <div class="rule-text"><strong>스트라이크</strong> 숫자와 자리가 모두 맞을 때 표시됩니다.</div>
-                </div>
-                <div class="rule-item">
-                    <span class="badge ball">B</span>
-                    <div class="rule-text"><strong>볼</strong> 숫자는 맞지만 자리가 다를 때 표시됩니다.</div>
-                </div>
-                <div class="rule-item">
-                    <span class="badge out">OUT</span>
-                    <div class="rule-text"><strong>아웃</strong> 맞는 숫자가 하나도 없을 때 표시됩니다.</div>
-                </div>
-            </div>
-            <div class="example-box">
-                <p class="example-title"><strong>1:1 대전 진행</strong></p>
-                <ul>
-                    <li>각자 상대가 맞혀야 할 비밀 숫자 4개를 먼저 정합니다.</li>
-                    <li>차례가 오면 중복 없는 숫자 4개를 입력하고 확인을 누릅니다.</li>
-                    <li>서버가 실제 상대 숫자로 S/B/OUT을 판정합니다.</li>
-                    <li>먼저 <strong>4 스트라이크</strong>를 만들면 홈런 승리입니다.</li>
-                </ul>
-            </div>
-            <p class="attempts-info">예: 정답이 1 2 3 4일 때 1 3 8 9를 입력하면 1S 1B입니다.</p>
-        `;
-    }
-}
-
 // Helper for safe event listener registration
 function safeAddListener(idOrEl, event, callback) {
     const el = typeof idOrEl === 'string' ? document.getElementById(idOrEl) : idOrEl;
@@ -139,7 +98,6 @@ function safeAddListener(idOrEl, event, callback) {
    ========================================================================== */
 
 document.addEventListener('DOMContentLoaded', () => {
-    hydrateRulesModal();
     // 0. Animate and remove Splash Screen
     const progress = document.getElementById('splash-progress');
     if (progress) {
@@ -719,10 +677,6 @@ function pollRoomState() {
             pollInterval = null;
             
             const isWin = room.winner === myRole;
-            if (room.secrets) {
-                const oppRole = myRole === 'host' ? 'guest' : 'host';
-                secretNumbers = room.secrets[oppRole] || secretNumbers;
-            }
             const myGuessesList = room.guesses ? (room.guesses[myRole] ? Object.values(room.guesses[myRole]) : []) : [];
             endGame(isWin, myGuessesList.length + 1, room.winner !== myRole, room.reason);
         }
@@ -992,6 +946,7 @@ function handleBackspace() {
     }
 }
 
+// Slots update
 function updateSlots() {
     slots.forEach((slot, i) => {
         if (i < currentGuess.length) {
@@ -1095,11 +1050,13 @@ function handleSubmitGuess() {
         }
     } else {
         if (currentRoomCode !== 'SAND') {
-            // Push only the guess to REST API. The server calculates S/B/O from the opponent's real secret.
+            // Push guess record to REST API
             const data = {
                 room: currentRoomCode,
                 role: myRole,
                 guess: currentGuess,
+                strikes: strikes,
+                balls: balls,
                 attempt: attemptNumber
             };
 
@@ -1110,11 +1067,6 @@ function handleSubmitGuess() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data)
-            }).then(res => {
-                if (!res.ok) throw new Error('guess submit failed');
-                return res.json();
-            }).then(room => {
-                syncRealtimeGuesses(room);
             }).catch(() => {
                 alert("투구 데이터 송신 실패!");
             });
@@ -1416,7 +1368,6 @@ window.onRestartClick = function() {
 };
 
 // Info modal toggles
-safeAddListener('btn-menu-rules', 'click', () => openModal(rulesModal));
 safeAddListener('btn-info', 'click', () => openModal(rulesModal));
 safeAddListener('btn-close-rules', 'click', () => closeModal(rulesModal));
 window.addEventListener('click', (e) => {

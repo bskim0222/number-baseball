@@ -263,6 +263,19 @@ body {
     box-shadow: var(--shadow-neon-gold);
 }
 
+.menu-btn.guide-btn {
+    background: rgba(0, 210, 255, 0.04);
+    border-color: rgba(0, 210, 255, 0.16);
+    color: var(--neon-blue);
+}
+
+.menu-btn.guide-btn:hover {
+    background: rgba(0, 210, 255, 0.08);
+    border-color: var(--neon-blue);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-neon-blue);
+}
+
 .menu-btn:active {
     transform: translateY(0) scale(0.98);
 }
@@ -1438,4 +1451,3 @@ body {
     border-color: #ffebee;
     box-shadow: 0 0 10px #f44336, inset 0 0 3px #fff;
 }
-
