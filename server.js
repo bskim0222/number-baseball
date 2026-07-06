@@ -46,8 +46,8 @@ setInterval(() => {
                 room.reason = 'disconnect';
                 console.log(`[WATCHDOG] Room ${roomCode} - Guest disconnected. Forfeit victory to Host.`);
             }
-            // Check Turn Timeout (30 seconds limit)
-            else if (room.status === 'playing' && (now - room.turnStartedAt) > 30000) {
+            // Check Turn Timeout (60 seconds limit)
+            else if (room.status === 'playing' && (now - room.turnStartedAt) > 60000) {
                 room.status = 'finished';
                 room.winner = room.currentTurn === 'host' ? 'guest' : 'host';
                 room.reason = 'timeout';

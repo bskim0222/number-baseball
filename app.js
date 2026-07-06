@@ -98,6 +98,20 @@ function safeAddListener(idOrEl, event, callback) {
    ========================================================================== */
 
 document.addEventListener('DOMContentLoaded', () => {
+    // 0. Animate and remove Splash Screen
+    const progress = document.getElementById('splash-progress');
+    if (progress) {
+        setTimeout(() => { progress.style.width = '100%'; }, 50);
+    }
+    setTimeout(() => {
+        const splash = document.getElementById('splash-screen');
+        if (splash) {
+            splash.style.opacity = '0';
+            splash.style.visibility = 'hidden';
+            setTimeout(() => { splash.remove(); }, 400);
+        }
+    }, 900);
+
     // 1. Initialize Profile via TossBridge
     TossBridge.getProfile().then(profile => {
         myPlayer = profile;
@@ -555,7 +569,7 @@ function pollRoomState() {
             if (timerContainer && timerValue && room.turnStartedAt) {
                 timerContainer.style.display = 'inline-flex';
                 const elapsed = Date.now() - room.turnStartedAt;
-                const remaining = Math.max(0, Math.ceil((30000 - elapsed) / 1000));
+                const remaining = Math.max(0, Math.ceil((60000 - elapsed) / 1000));
                 timerValue.textContent = remaining;
             }
         } else {
