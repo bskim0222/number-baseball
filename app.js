@@ -129,6 +129,64 @@ document.addEventListener('DOMContentLoaded', () => {
         if (urlRoomCode && urlRoomCode.length === 4) {
             autoJoinRoomFromUrl(urlRoomCode);
         }
+
+        // 1.2 Check if screenshot query parameter exists for taking app store screenshots
+        const screenshotParam = urlParams.get('screenshot');
+        if (screenshotParam) {
+            window.isAutomatedTest = true; // bypass confirmation dialogs
+            if (screenshotParam === 'lobby') {
+                // Populate rankings and profile stats with realistic mock data
+                myPlayer.name = "김토스";
+                myPlayer.wins = 12;
+                myPlayer.losses = 3;
+                myPlayer.rate = 80.0;
+                updateLobbyStatsUI();
+                document.getElementById('lobby-profile-name').innerHTML = `${myPlayer.name} <i class="fa-solid fa-pen-to-square edit-icon" style="font-size: 0.8rem; margin-left: 5px; opacity: 0.6;"></i>`;
+                
+                const container = document.getElementById('public-rooms-list');
+                if (container) {
+                    container.innerHTML = `
+                        <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: rgba(255,255,255,0.05); border-radius: 8px; border: 1px solid rgba(255,255,255,0.05); font-size: 0.85rem; margin-bottom: 8px;">
+                            <div>
+                                <span style="font-weight: 600; color: #fff;">홈런왕김자바 님의 방</span>
+                                <span style="display: block; font-size: 0.75rem; color: var(--neon-blue); font-family: var(--font-numeric); margin-top: 2px;"># 1234</span>
+                            </div>
+                            <button style="padding: 6px 12px; background: var(--neon-blue); color: #000; border: none; border-radius: 6px; font-weight: 700; font-size: 0.8rem; cursor: pointer;">입장</button>
+                        </div>
+                        <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: rgba(255,255,255,0.05); border-radius: 8px; border: 1px solid rgba(255,255,255,0.05); font-size: 0.85rem;">
+                            <div>
+                                <span style="font-weight: 600; color: #fff;">도토리수집가 님의 방</span>
+                                <span style="display: block; font-size: 0.75rem; color: var(--neon-blue); font-family: var(--font-numeric); margin-top: 2px;"># 5678</span>
+                            </div>
+                            <button style="padding: 6px 12px; background: var(--neon-blue); color: #000; border: none; border-radius: 6px; font-weight: 700; font-size: 0.8rem; cursor: pointer;">입장</button>
+                        </div>
+                    `;
+                }
+            } else if (screenshotParam === 'game' || screenshotParam === 'game_horizontal') {
+                setTimeout(() => {
+                    gameMode = 'solo';
+                    startSoloGame();
+                    secretNumbers = [1, 2, 3, 4];
+                    
+                    // Make some guesses to populate UI scoreboard and history logs
+                    currentGuess = [1, 5, 3, 7]; // 2S 0B
+                    handleSubmitGuess();
+                    currentGuess = [8, 9, 0, 2]; // 0S 0B (out)
+                    handleSubmitGuess();
+                    
+                    // Active typing
+                    currentGuess = [5, 2, 4, 3];
+                    updateSlots();
+                }, 1000);
+            } else if (screenshotParam === 'result') {
+                setTimeout(() => {
+                    gameMode = 'solo';
+                    startSoloGame();
+                    secretNumbers = [1, 2, 3, 4];
+                    endGame(true, 5);
+                }, 1000);
+            }
+        }
     });
 
     // 2. Setup Profile Nickname Modifier
@@ -961,10 +1019,12 @@ function handleSubmitGuess() {
     let strikes = 0;
     let balls = 0;
 
+    const parsedSecret = secretNumbers.map(Number);
     currentGuess.forEach((digit, i) => {
-        if (digit === secretNumbers[i]) {
+        const guestDigit = Number(digit);
+        if (guestDigit === parsedSecret[i]) {
             strikes++;
-        } else if (secretNumbers.includes(digit)) {
+        } else if (parsedSecret.includes(guestDigit)) {
             balls++;
         }
     });
