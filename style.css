@@ -953,7 +953,7 @@ body {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     align-content: start;
-    gap: 5px;
+    gap: 4px;
     padding-right: 0;
 }
 
@@ -983,22 +983,22 @@ body {
 /* Mini history items inside split view */
 .history-item {
     display: grid;
-    grid-template-columns: auto 1fr;
-    grid-template-areas:
-        "index result"
-        "guess guess";
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: "index guess result";
     align-items: center;
     background: rgba(255, 255, 255, 0.02);
     border: 1px solid rgba(255, 255, 255, 0.04);
-    border-radius: var(--radius-sm);
-    padding: 4px 5px;
-    min-height: 42px;
+    border-radius: 6px;
+    padding: 2px 4px;
+    min-height: 26px;
+    gap: 3px;
+    min-width: 0;
 }
 
 .history-index {
     grid-area: index;
     font-family: var(--font-numeric);
-    font-size: 0.62rem;
+    font-size: 0.58rem;
     color: var(--text-muted);
     width: auto;
 }
@@ -1006,13 +1006,15 @@ body {
 .history-guess {
     grid-area: guess;
     font-family: var(--font-numeric);
-    font-size: 0.78rem;
+    font-size: 0.68rem;
     font-weight: 700;
-    letter-spacing: 1px;
+    letter-spacing: 0;
     color: var(--text-main);
     text-align: left;
     padding-left: 0;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: clip;
 }
 
 .history-result {
@@ -1021,17 +1023,18 @@ body {
     gap: 2px;
     justify-content: flex-end;
     min-width: 0;
+    white-space: nowrap;
 }
 
 /* Badges for Strike, Ball, Out */
 .badge {
     font-family: var(--font-numeric);
-    font-size: 0.62rem;
+    font-size: 0.56rem;
     font-weight: 700;
-    padding: 1px 3px;
+    padding: 1px 2px;
     border-radius: 4px;
     text-align: center;
-    min-width: 18px;
+    min-width: 16px;
 }
 
 .badge.strike {
