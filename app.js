@@ -40,6 +40,8 @@ let lastMyGuessesJson = '';
 let lastOppGuessesJson = '';
 let lastSpokenMyAttempt = 0;
 let gameAudioContext = null;
+let activeSpeechUtterance = null;
+let lastNotifiedGuestId = '';
 
 // Mock Leaderboard for Offline Fallback
 const mockRankings = [
@@ -180,6 +182,7 @@ function resetRealtimeRenderCache() {
     lastMyGuessesJson = '';
     lastOppGuessesJson = '';
     lastSpokenMyAttempt = 0;
+    lastNotifiedGuestId = '';
 }
 
 function getResultVoiceText(strikes, balls) {
@@ -387,8 +390,107 @@ function speakResult(strikes, balls) {
     speakReferee(getRefereeVoiceText(strikes, balls), 120);
 }
 
+function getRefereeVoiceText(strikes, balls) {
+    if (strikes === DIGIT_COUNT) return '홈런!';
+    if (strikes === 0 && balls === 0) return '아웃!';
+
+    const countWords = ['', '원', '투', '쓰리', '포'];
+    const parts = [];
+    if (strikes > 0) parts.push(`${countWords[strikes] || strikes} 스트라이크`);
+    if (balls > 0) parts.push(`${countWords[balls] || balls} 볼`);
+    return `${parts.join(' ')}!`;
+}
+
+function warmUpSpeechSynthesis() {
+    try {
+        if ('speechSynthesis' in window && window.speechSynthesis.getVoices) {
+            window.speechSynthesis.getVoices();
+        }
+    } catch (err) {
+        // Optional browser capability.
+    }
+}
+
+function speakReferee(text) {
+    try {
+        if (!('speechSynthesis' in window) || !window.SpeechSynthesisUtterance) return;
+        warmUpSpeechSynthesis();
+
+        if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+            window.speechSynthesis.cancel();
+        }
+
+        const utterance = new SpeechSynthesisUtterance(text);
+        const voice = getPreferredUmpireVoice();
+        if (voice) utterance.voice = voice;
+
+        utterance.lang = 'ko-KR';
+        utterance.rate = text === '플레이볼!' ? 0.9 : 0.96;
+        utterance.pitch = 0.42;
+        utterance.volume = 1;
+        utterance.onend = () => {
+            if (activeSpeechUtterance === utterance) activeSpeechUtterance = null;
+        };
+        utterance.onerror = () => {
+            if (activeSpeechUtterance === utterance) activeSpeechUtterance = null;
+        };
+
+        activeSpeechUtterance = utterance;
+        window.speechSynthesis.speak(utterance);
+    } catch (err) {
+        // Sound feedback is optional; never block gameplay.
+    }
+}
+
+function announcePlayBall() {
+    speakReferee('플레이볼!');
+    playStartMusic();
+}
+
+function speakResult(strikes, balls) {
+    speakReferee(getRefereeVoiceText(strikes, balls));
+    playUmpireCue(strikes, balls);
+}
+
+function requestRoomNotificationPermission() {
+    try {
+        if ('Notification' in window && Notification.permission === 'default') {
+            Notification.requestPermission().catch(() => {});
+        }
+    } catch (err) {
+        // Browser notifications are optional.
+    }
+}
+
+function notifyGuestJoined(guest) {
+    const guestName = (guest && guest.name) ? guest.name : '상대방';
+    TossBridge.vibrate('heavy');
+    playTone(660, 0, 0.08, 'triangle', 0.08);
+    playTone(880, 0.10, 0.14, 'triangle', 0.09);
+    speakReferee(`${guestName}님 입장!`);
+
+    try {
+        if ('Notification' in window && Notification.permission === 'granted') {
+            new Notification('상대방 입장', {
+                body: `${guestName}님이 방에 들어왔습니다.`,
+                silent: true
+            });
+        }
+    } catch (err) {
+        // Browser notifications are optional.
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     hydrateRulesModal();
+    warmUpSpeechSynthesis();
+    try {
+        if ('speechSynthesis' in window) {
+            window.speechSynthesis.onvoiceschanged = warmUpSpeechSynthesis;
+        }
+    } catch (err) {
+        // Optional browser capability.
+    }
     // 0. Animate and remove Splash Screen
     const progress = document.getElementById('splash-progress');
     if (progress) {
@@ -768,6 +870,7 @@ safeAddListener('btn-menu-create', 'click', () => {
     gameMode = 'multi';
     myRole = 'host';
     isGameOver = false;
+    requestRoomNotificationPermission();
 
     // Setup host UI
     document.getElementById('opponent-name').textContent = '상대 대기 중...';
@@ -949,6 +1052,11 @@ function pollRoomState() {
 
         // 3. Guest Joins
         if (room.status === 'setup' && myRole === 'host' && room.guest) {
+            const guestKey = room.guest.id || room.guest.name || 'guest';
+            if (guestKey !== lastNotifiedGuestId) {
+                lastNotifiedGuestId = guestKey;
+                notifyGuestJoined(room.guest);
+            }
             document.getElementById('opponent-name').textContent = room.guest.name;
             document.getElementById('opponent-avatar').className = 'fa-solid fa-circle-user';
             document.getElementById('opponent-card').className = 'player-card active-player';

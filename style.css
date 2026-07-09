@@ -885,25 +885,36 @@ body {
 
 .scoreboard-led-panel {
     display: grid !important;
-    grid-template-columns: 118px minmax(0, 1fr);
+    grid-template-columns: 76px minmax(0, 1fr);
     grid-auto-rows: auto;
-    column-gap: 14px !important;
-    row-gap: 4px !important;
+    column-gap: 8px !important;
+    row-gap: 2px !important;
     align-items: center;
-    padding: 8px 12px !important;
-    margin: 0 15px 8px 15px !important;
+    padding: 6px 8px !important;
+    margin: 0 10px 8px 10px !important;
 }
 
 .scoreboard-led-panel > div:first-of-type {
     grid-column: 1;
     margin-bottom: 0 !important;
-    font-size: 0.68rem !important;
+    font-size: 0.56rem !important;
     justify-content: flex-start !important;
+    line-height: 1.1;
 }
 
 .scoreboard-led-panel > div:not(:first-of-type) {
     grid-column: 1;
-    gap: 8px !important;
+    gap: 4px !important;
+    min-width: 0;
+}
+
+.scoreboard-led-panel > div:not(:first-of-type) > span:first-child {
+    width: 12px !important;
+    font-size: 0.72rem !important;
+}
+
+.scoreboard-led-panel > div:not(:first-of-type) > div {
+    gap: 3px !important;
 }
 
 #scoreboard-guess-val {
@@ -925,14 +936,15 @@ body {
 .guess-slots {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 7px;
+    gap: 6px;
     width: 100%;
     justify-content: space-between;
 }
 
 .slot {
-    width: 48px;
-    height: 58px;
+    width: 100%;
+    min-width: 0;
+    height: clamp(48px, 13vw, 58px);
     background: var(--bg-slot);
     border: 2px solid rgba(255, 255, 255, 0.1);
     border-radius: 10px;
@@ -1481,8 +1493,8 @@ body {
    LED SCOREBOARD LIGHTS
    ========================================================================== */
 .led-light {
-    width: 14px;
-    height: 14px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
     background: rgba(255,255,255,0.08);
     border: 1px solid rgba(255,255,255,0.1);
