@@ -481,16 +481,163 @@ function notifyGuestJoined(guest) {
     }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-    hydrateRulesModal();
-    warmUpSpeechSynthesis();
+const UMPIRE_AUDIO_BASE = 'assets/audio/umpire/';
+const UMPIRE_AUDIO_FILES = {
+    playball: 'playball.wav',
+    guest_join: 'guest_join.wav',
+    out: 'out.wav',
+    homerun: 'homerun.wav',
+    s0b1: 's0b1.wav',
+    s0b2: 's0b2.wav',
+    s0b3: 's0b3.wav',
+    s0b4: 's0b4.wav',
+    s1b0: 's1b0.wav',
+    s1b1: 's1b1.wav',
+    s1b2: 's1b2.wav',
+    s1b3: 's1b3.wav',
+    s2b0: 's2b0.wav',
+    s2b1: 's2b1.wav',
+    s2b2: 's2b2.wav',
+    s3b0: 's3b0.wav',
+    s3b1: 's3b1.wav'
+};
+const umpireAudioCache = {};
+
+function warmUpSpeechSynthesis() {
+    preloadStartAudio();
+}
+
+function preloadUmpireAudio() {
+    Object.keys(UMPIRE_AUDIO_FILES).forEach(key => {
+        if (umpireAudioCache[key]) return;
+        const audio = new Audio(`${UMPIRE_AUDIO_BASE}${UMPIRE_AUDIO_FILES[key]}`);
+        audio.preload = 'auto';
+        audio.volume = 1;
+        umpireAudioCache[key] = audio;
+    });
+}
+
+function getUmpireAudioKey(strikes, balls) {
+    if (strikes === DIGIT_COUNT) return 'homerun';
+    if (strikes === 0 && balls === 0) return 'out';
+    return `s${strikes}b${balls}`;
+}
+
+function playUmpireAudio(key) {
+    const file = UMPIRE_AUDIO_FILES[key];
+    if (!file) return false;
+
     try {
-        if ('speechSynthesis' in window) {
-            window.speechSynthesis.onvoiceschanged = warmUpSpeechSynthesis;
+        const cached = umpireAudioCache[key] || new Audio(`${UMPIRE_AUDIO_BASE}${file}`);
+        umpireAudioCache[key] = cached;
+        const audio = cached.cloneNode(true);
+        audio.volume = 1;
+        const playPromise = audio.play();
+        if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch(err => {
+                console.warn('Umpire audio blocked or missing:', key, err);
+            });
+        }
+        return true;
+    } catch (err) {
+        console.warn('Umpire audio failed:', key, err);
+        return false;
+    }
+}
+
+function speakReferee(text) {
+    if (text && text.indexOf('입장') !== -1) {
+        playUmpireAudio('guest_join');
+    }
+}
+
+function announcePlayBall() {
+    playStartMusic();
+    playUmpireAudio('playball');
+}
+
+function speakResult(strikes, balls) {
+    playUmpireCue(strikes, balls);
+    playUmpireAudio(getUmpireAudioKey(strikes, balls));
+}
+
+function notifyGuestJoined(guest) {
+    const guestName = (guest && guest.name) ? guest.name : '상대방';
+    TossBridge.vibrate('heavy');
+    playTone(660, 0, 0.08, 'triangle', 0.08);
+    playTone(880, 0.10, 0.14, 'triangle', 0.09);
+    playUmpireAudio('guest_join');
+
+    try {
+        if ('Notification' in window && Notification.permission === 'granted') {
+            new Notification('상대방 입장', {
+                body: `${guestName}님이 방에 들어왔습니다.`,
+                silent: true
+            });
         }
     } catch (err) {
-        // Optional browser capability.
+        // Browser notifications are optional.
     }
+}
+
+const START_AUDIO_FILE = 'assets/audio/playball.mp3';
+let startAudioCache = null;
+
+function preloadStartAudio() {
+    if (startAudioCache) return;
+    startAudioCache = new Audio(START_AUDIO_FILE);
+    startAudioCache.preload = 'auto';
+    startAudioCache.volume = 1;
+}
+
+function warmUpSpeechSynthesis() {
+    preloadStartAudio();
+}
+
+function playStartAudio() {
+    try {
+        preloadStartAudio();
+        const audio = startAudioCache.cloneNode(true);
+        audio.volume = 1;
+        const playPromise = audio.play();
+        if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch(err => console.warn('Start audio blocked or missing:', err));
+        }
+    } catch (err) {
+        console.warn('Start audio failed:', err);
+    }
+}
+
+function speakReferee() {
+    // Disabled: no generated voice or judgment voice.
+}
+
+function announcePlayBall() {
+    playStartAudio();
+}
+
+function speakResult() {
+    // Disabled: judgment sound removed by request.
+}
+
+function notifyGuestJoined(guest) {
+    const guestName = (guest && guest.name) ? guest.name : '상대방';
+    TossBridge.vibrate('heavy');
+
+    try {
+        if ('Notification' in window && Notification.permission === 'granted') {
+            new Notification('상대방 입장', {
+                body: `${guestName}님이 방에 들어왔습니다.`
+            });
+        }
+    } catch (err) {
+        // Browser notifications are optional.
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    hydrateRulesModal();
+    preloadStartAudio();
     // 0. Animate and remove Splash Screen
     const progress = document.getElementById('splash-progress');
     if (progress) {
@@ -1876,4 +2023,48 @@ safeAddListener('btn-exit-game', 'click', () => {
 /* ==========================================================================
    INITIAL RUN
    ========================================================================== */
+const FINAL_START_AUDIO_FILE = 'assets/audio/playball.mp3?v=20260709-playball-only';
+let finalStartAudioCache = null;
+
+function stopGeneratedVoice() {
+    try {
+        if ('speechSynthesis' in window) {
+            window.speechSynthesis.cancel();
+        }
+    } catch (err) {
+        // Ignore unsupported browser speech APIs.
+    }
+}
+
+function loadFinalStartAudio() {
+    if (finalStartAudioCache) return finalStartAudioCache;
+    finalStartAudioCache = new Audio(FINAL_START_AUDIO_FILE);
+    finalStartAudioCache.preload = 'auto';
+    finalStartAudioCache.volume = 1;
+    return finalStartAudioCache;
+}
+
+preloadStartAudio = loadFinalStartAudio;
+warmUpSpeechSynthesis = loadFinalStartAudio;
+speakReferee = function() {
+    stopGeneratedVoice();
+};
+speakResult = function() {
+    stopGeneratedVoice();
+};
+announcePlayBall = function() {
+    stopGeneratedVoice();
+    try {
+        const source = loadFinalStartAudio();
+        const audio = source.cloneNode(true);
+        audio.volume = 1;
+        const playPromise = audio.play();
+        if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch(err => console.warn('Playball mp3 blocked or missing:', err));
+        }
+    } catch (err) {
+        console.warn('Playball mp3 failed:', err);
+    }
+};
+
 showScreen('screen-lobby');
