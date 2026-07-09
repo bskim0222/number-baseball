@@ -265,6 +265,128 @@ function speakResult(strikes, balls) {
    INITIALIZATION (유저 로그인 및 초기 연결)
    ========================================================================== */
 
+function playNoise(delay, duration, volume = 0.04) {
+    const ctx = getAudioContext();
+    if (!ctx) return;
+
+    const sampleRate = ctx.sampleRate;
+    const buffer = ctx.createBuffer(1, Math.max(1, Math.floor(sampleRate * duration)), sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) {
+        data[i] = (Math.random() * 2 - 1) * 0.55;
+    }
+
+    const source = ctx.createBufferSource();
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+    const start = ctx.currentTime + delay;
+    const end = start + duration;
+
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(900, start);
+    filter.Q.setValueAtTime(0.7, start);
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.linearRampToValueAtTime(volume, start + 0.04);
+    gain.gain.exponentialRampToValueAtTime(0.0001, end);
+
+    source.buffer = buffer;
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    source.start(start);
+    source.stop(end + 0.02);
+}
+
+function playStartMusic() {
+    playNoise(0, 0.45, 0.018);
+    playTone(392, 0.02, 0.12, 'triangle', 0.08);
+    playTone(523, 0.16, 0.12, 'triangle', 0.08);
+    playTone(659, 0.30, 0.16, 'triangle', 0.09);
+    playTone(784, 0.48, 0.22, 'triangle', 0.1);
+    playTone(1046, 0.50, 0.18, 'sine', 0.035);
+}
+
+function playUmpireCue(strikes, balls) {
+    if (strikes === DIGIT_COUNT) {
+        playTone(330, 0, 0.08, 'square', 0.07);
+        playTone(440, 0.10, 0.08, 'square', 0.07);
+        playTone(660, 0.20, 0.20, 'triangle', 0.1);
+        playNoise(0.05, 0.24, 0.02);
+        return;
+    }
+
+    if (strikes === 0 && balls === 0) {
+        playTone(190, 0, 0.10, 'sawtooth', 0.08);
+        playTone(135, 0.12, 0.16, 'sawtooth', 0.07);
+        return;
+    }
+
+    const total = strikes + balls;
+    for (let i = 0; i < total; i++) {
+        const isStrikeTone = i < strikes;
+        playTone(isStrikeTone ? 360 : 250, i * 0.09, 0.055, 'square', isStrikeTone ? 0.06 : 0.045);
+    }
+}
+
+function getRefereeVoiceText(strikes, balls) {
+    if (strikes === DIGIT_COUNT) return '홈런!';
+    if (strikes === 0 && balls === 0) return '아웃!';
+
+    const countWords = ['', '원', '투', '쓰리', '포'];
+    const parts = [];
+    if (strikes > 0) parts.push(`${countWords[strikes] || strikes} 스트라이크`);
+    if (balls > 0) parts.push(`${countWords[balls] || balls} 볼`);
+    return `${parts.join(' ')}!`;
+}
+
+function getPreferredUmpireVoice() {
+    if (!('speechSynthesis' in window) || !window.speechSynthesis.getVoices) return null;
+    const voices = window.speechSynthesis.getVoices();
+    const koVoices = voices.filter(voice => voice.lang && voice.lang.toLowerCase().startsWith('ko'));
+    const maleHints = /(injoon|joon|male|man|남성|남자)/i;
+    return koVoices.find(voice => maleHints.test(`${voice.name} ${voice.voiceURI}`))
+        || voices.find(voice => maleHints.test(`${voice.name} ${voice.voiceURI}`))
+        || koVoices[0]
+        || null;
+}
+
+function speakReferee(text, delay = 120) {
+    try {
+        if (!('speechSynthesis' in window) || !window.SpeechSynthesisUtterance) return;
+        window.speechSynthesis.cancel();
+
+        const utterance = new SpeechSynthesisUtterance(text);
+        const voice = getPreferredUmpireVoice();
+        if (voice) utterance.voice = voice;
+
+        utterance.lang = 'ko-KR';
+        utterance.rate = text === '플레이볼!' ? 0.9 : 0.96;
+        utterance.pitch = 0.42;
+        utterance.volume = 1;
+        setTimeout(() => window.speechSynthesis.speak(utterance), delay);
+    } catch (err) {
+        // Sound feedback is optional; never block gameplay.
+    }
+}
+
+function announcePlayBall() {
+    playStartMusic();
+    speakReferee('플레이볼!', 360);
+}
+
+function getResultVoiceText(strikes, balls) {
+    return getRefereeVoiceText(strikes, balls);
+}
+
+function playResultJingle(strikes, balls) {
+    playUmpireCue(strikes, balls);
+}
+
+function speakResult(strikes, balls) {
+    playUmpireCue(strikes, balls);
+    speakReferee(getRefereeVoiceText(strikes, balls), 120);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     hydrateRulesModal();
     // 0. Animate and remove Splash Screen
@@ -911,6 +1033,7 @@ function startSoloGame() {
     loadBestScore();
     enableKeypad();
     showScreen('screen-game');
+    announcePlayBall();
 }
 
 function generateSecretNumber() {
@@ -964,6 +1087,7 @@ function startMultiGame(roomData) {
 
     enableKeypad();
     showScreen('screen-game');
+    announcePlayBall();
 }
 
 function setTurnState(isMe) {
@@ -973,12 +1097,18 @@ function setTurnState(isMe) {
         turnText.textContent = '내 차례';
         playerMeBox.className = 'battle-player me-turn';
         playerOppBox.className = 'battle-player';
+        btnSimulateOpp.classList.add('hidden');
         enableKeypad();
     } else {
         turnBulb.className = 'turn-bulb active-opp';
         turnText.textContent = '상대 차례';
         playerMeBox.className = 'battle-player';
         playerOppBox.className = 'battle-player opp-turn';
+        if (currentRoomCode === 'SAND') {
+            btnSimulateOpp.classList.remove('hidden');
+        } else {
+            btnSimulateOpp.classList.add('hidden');
+        }
         disableKeypad();
     }
 }
@@ -1343,6 +1473,7 @@ function handleSubmitGuess() {
 
 function simulateOfflineBotTurn() {
     if (isGameOver || gameMode !== 'multi') return;
+    if (currentRoomCode === 'SAND' && isMyTurn) return;
 
     const botGuess = generateSecretNumber();
     let strikes = 0;
@@ -1573,6 +1704,11 @@ safeAddListener(document.querySelector('.keypad-grid'), 'click', (e) => {
     } else {
         handleNumberInput(parseInt(key));
     }
+});
+
+safeAddListener('btn-simulate-opp', 'click', () => {
+    if (currentRoomCode !== 'SAND' || isMyTurn || isGameOver) return;
+    simulateOfflineBotTurn();
 });
 
 // 2. Physical Keyboards (Only active when in game screen and no modal open)

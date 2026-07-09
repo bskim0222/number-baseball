@@ -58,6 +58,10 @@ body {
     overflow: hidden;
 }
 
+.hidden {
+    display: none !important;
+}
+
 /* Desktop Centered Container */
 .app-wrapper {
     width: 100%;
@@ -836,9 +840,22 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 15px;
-    font-size: 0.85rem;
+    gap: 8px;
+    margin-bottom: 10px;
+    font-size: 0.8rem;
     color: var(--text-muted);
+}
+
+#turn-timer-container {
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+    flex: 0 0 auto;
+    padding: 3px 7px;
+    border-radius: 999px;
+    background: rgba(255, 170, 0, 0.08);
+    border: 1px solid rgba(255, 170, 0, 0.18);
+    font-size: 0.74rem;
 }
 
 .game-info-mini strong {
@@ -868,21 +885,29 @@ body {
 
 .scoreboard-led-panel {
     display: grid !important;
-    grid-template-columns: minmax(0, 1fr) 150px;
+    grid-template-columns: 118px minmax(0, 1fr);
     grid-auto-rows: auto;
-    column-gap: 12px !important;
-    row-gap: 6px !important;
+    column-gap: 14px !important;
+    row-gap: 4px !important;
     align-items: center;
-    padding: 10px 14px !important;
+    padding: 8px 12px !important;
     margin: 0 15px 8px 15px !important;
 }
 
 .scoreboard-led-panel > div:first-of-type {
-    grid-column: 1 / -1;
+    grid-column: 1;
+    margin-bottom: 0 !important;
+    font-size: 0.68rem !important;
+    justify-content: flex-start !important;
 }
 
 .scoreboard-led-panel > div:not(:first-of-type) {
     grid-column: 1;
+    gap: 8px !important;
+}
+
+#scoreboard-guess-val {
+    display: none;
 }
 
 /* ==========================================================================
@@ -892,7 +917,7 @@ body {
     display: flex;
     justify-content: center;
     grid-column: 2;
-    grid-row: 2 / span 3;
+    grid-row: 1 / span 4;
     align-self: center;
     margin: 0;
 }
@@ -900,14 +925,14 @@ body {
 .guess-slots {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 5px;
+    gap: 7px;
     width: 100%;
     justify-content: space-between;
 }
 
 .slot {
-    width: 32px;
-    height: 42px;
+    width: 48px;
+    height: 58px;
     background: var(--bg-slot);
     border: 2px solid rgba(255, 255, 255, 0.1);
     border-radius: 10px;
@@ -915,7 +940,7 @@ body {
     justify-content: center;
     align-items: center;
     font-family: var(--font-numeric);
-    font-size: 1.35rem;
+    font-size: 1.75rem;
     font-weight: 700;
     color: var(--neon-blue);
     transition: var(--transition-smooth);
