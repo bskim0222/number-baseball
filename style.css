@@ -866,33 +866,56 @@ body {
     transform: scale(0.95);
 }
 
+.scoreboard-led-panel {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) 150px;
+    grid-auto-rows: auto;
+    column-gap: 12px !important;
+    row-gap: 6px !important;
+    align-items: center;
+    padding: 10px 14px !important;
+    margin: 0 15px 8px 15px !important;
+}
+
+.scoreboard-led-panel > div:first-of-type {
+    grid-column: 1 / -1;
+}
+
+.scoreboard-led-panel > div:not(:first-of-type) {
+    grid-column: 1;
+}
+
 /* ==========================================================================
    SLOTS DISPLAY
    ========================================================================== */
 .display-section {
     display: flex;
     justify-content: center;
-    margin-bottom: 15px;
+    grid-column: 2;
+    grid-row: 2 / span 3;
+    align-self: center;
+    margin: 0;
 }
 
 .guess-slots {
-    display: flex;
-    gap: 12px;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 5px;
     width: 100%;
     justify-content: space-between;
 }
 
 .slot {
-    flex: 1;
-    aspect-ratio: 1;
+    width: 32px;
+    height: 42px;
     background: var(--bg-slot);
     border: 2px solid rgba(255, 255, 255, 0.1);
-    border-radius: var(--radius-md);
+    border-radius: 10px;
     display: flex;
     justify-content: center;
     align-items: center;
     font-family: var(--font-numeric);
-    font-size: 2rem;
+    font-size: 1.35rem;
     font-weight: 700;
     color: var(--neon-blue);
     transition: var(--transition-smooth);
@@ -915,12 +938,12 @@ body {
    DUAL LOG HISTORY (Split Column Layout)
    ========================================================================== */
 .dual-history-section {
-    flex: 1;
-    min-height: 200px;
+    flex: 1.6;
+    min-height: 325px;
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 12px;
-    margin-bottom: 20px;
+    gap: 10px;
+    margin-bottom: 12px;
     overflow: hidden;
 }
 
@@ -928,7 +951,7 @@ body {
     background: var(--bg-card);
     border: 1px solid rgba(255, 255, 255, 0.05);
     border-radius: var(--radius-lg);
-    padding: 12px;
+    padding: 10px;
     display: flex;
     flex-direction: column;
     box-shadow: var(--shadow-card);
@@ -939,21 +962,20 @@ body {
     font-size: 0.8rem;
     font-weight: 700;
     color: var(--text-muted);
-    margin-bottom: 10px;
+    margin-bottom: 7px;
     display: flex;
     align-items: center;
     gap: 5px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    padding-bottom: 5px;
+    padding-bottom: 4px;
 }
 
 .history-list {
     flex: 1;
     overflow-y: hidden;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-content: start;
-    gap: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
     padding-right: 0;
 }
 
@@ -972,7 +994,6 @@ body {
 }
 
 .empty-placeholder-mini {
-    grid-column: 1 / -1;
     font-size: 0.75rem;
     color: var(--text-muted);
     text-align: center;
@@ -982,59 +1003,57 @@ body {
 
 /* Mini history items inside split view */
 .history-item {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    grid-template-areas: "index guess result";
+    display: flex;
     align-items: center;
+    justify-content: space-between;
     background: rgba(255, 255, 255, 0.02);
     border: 1px solid rgba(255, 255, 255, 0.04);
     border-radius: 6px;
-    padding: 2px 4px;
-    min-height: 26px;
-    gap: 3px;
+    padding: 2px 6px;
+    min-height: 22px;
+    gap: 5px;
     min-width: 0;
 }
 
 .history-index {
-    grid-area: index;
     font-family: var(--font-numeric);
-    font-size: 0.58rem;
+    font-size: 0.66rem;
     color: var(--text-muted);
-    width: auto;
+    width: 22px;
+    flex: 0 0 22px;
 }
 
 .history-guess {
-    grid-area: guess;
     font-family: var(--font-numeric);
-    font-size: 0.68rem;
+    font-size: 0.84rem;
     font-weight: 700;
-    letter-spacing: 0;
+    letter-spacing: 1px;
     color: var(--text-main);
     text-align: left;
     padding-left: 0;
     white-space: nowrap;
-    overflow: hidden;
-    text-overflow: clip;
+    overflow: visible;
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
 .history-result {
-    grid-area: result;
     display: flex;
-    gap: 2px;
+    gap: 3px;
     justify-content: flex-end;
-    min-width: 0;
+    flex: 0 0 auto;
     white-space: nowrap;
 }
 
 /* Badges for Strike, Ball, Out */
 .badge {
     font-family: var(--font-numeric);
-    font-size: 0.56rem;
+    font-size: 0.62rem;
     font-weight: 700;
-    padding: 1px 2px;
+    padding: 1px 3px;
     border-radius: 4px;
     text-align: center;
-    min-width: 16px;
+    min-width: 20px;
 }
 
 .badge.strike {

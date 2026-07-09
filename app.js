@@ -38,6 +38,8 @@ let lobbyInterval = null; // Used to poll waiting room list in lobby
 let lastRoomDataJson = ''; // Used to prevent redundant redraws
 let lastMyGuessesJson = '';
 let lastOppGuessesJson = '';
+let lastSpokenMyAttempt = 0;
+let gameAudioContext = null;
 
 // Mock Leaderboard for Offline Fallback
 const mockRankings = [
@@ -177,6 +179,86 @@ function resetRealtimeRenderCache() {
     lastRoomDataJson = '';
     lastMyGuessesJson = '';
     lastOppGuessesJson = '';
+    lastSpokenMyAttempt = 0;
+}
+
+function getResultVoiceText(strikes, balls) {
+    if (strikes === DIGIT_COUNT) return '홈런!';
+    if (strikes === 0 && balls === 0) return '아웃!';
+
+    const countWords = ['', '원', '투', '쓰리', '포'];
+    const parts = [];
+    if (strikes > 0) parts.push(`${countWords[strikes] || strikes} 스트라이크`);
+    if (balls > 0) parts.push(`${countWords[balls] || balls} 볼`);
+    return `${parts.join(' ')}!`;
+}
+
+function getAudioContext() {
+    try {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) return null;
+        if (!gameAudioContext) gameAudioContext = new AudioContextClass();
+        if (gameAudioContext.state === 'suspended') {
+            gameAudioContext.resume().catch(() => {});
+        }
+        return gameAudioContext;
+    } catch (err) {
+        return null;
+    }
+}
+
+function playTone(freq, delay, duration, type = 'sine', volume = 0.08) {
+    const ctx = getAudioContext();
+    if (!ctx) return;
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const start = ctx.currentTime + delay;
+    const end = start + duration;
+
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, start);
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(volume, start + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, end);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(start);
+    osc.stop(end + 0.02);
+}
+
+function playResultJingle(strikes, balls) {
+    if (strikes === DIGIT_COUNT) {
+        playTone(523, 0, 0.08, 'triangle', 0.1);
+        playTone(659, 0.09, 0.08, 'triangle', 0.1);
+        playTone(784, 0.18, 0.16, 'triangle', 0.11);
+    } else if (strikes === 0 && balls === 0) {
+        playTone(180, 0, 0.16, 'sawtooth', 0.06);
+    } else {
+        const total = strikes + balls;
+        for (let i = 0; i < total; i++) {
+            playTone(strikes > i ? 620 : 420, i * 0.07, 0.05, 'square', 0.045);
+        }
+    }
+}
+
+function speakResult(strikes, balls) {
+    const text = getResultVoiceText(strikes, balls);
+    playResultJingle(strikes, balls);
+
+    try {
+        if (!('speechSynthesis' in window) || !window.SpeechSynthesisUtterance) return;
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = 'ko-KR';
+        utterance.rate = 1.08;
+        utterance.pitch = strikes === DIGIT_COUNT ? 1.18 : 1.02;
+        utterance.volume = 1;
+        setTimeout(() => window.speechSynthesis.speak(utterance), 90);
+    } catch (err) {
+        // Sound feedback is optional; never block gameplay.
+    }
 }
 
 /* ==========================================================================
@@ -925,6 +1007,11 @@ function syncRealtimeGuesses(room) {
     const cachedMyGuessesJson = JSON.stringify(cachedMyGuesses);
     if (cachedMyGuessesJson !== lastMyGuessesJson) {
         lastMyGuessesJson = cachedMyGuessesJson;
+        const latestGuessForVoice = cachedMyGuesses[cachedMyGuesses.length - 1];
+        if (latestGuessForVoice && latestGuessForVoice.attempt > lastSpokenMyAttempt && currentScreen === 'screen-game') {
+            lastSpokenMyAttempt = latestGuessForVoice.attempt;
+            speakResult(latestGuessForVoice.strikes, latestGuessForVoice.balls);
+        }
         renderHistoryList(myHistoryContainer, cachedMyGuesses, '아직 기록이 없습니다.');
     }
 
@@ -1190,6 +1277,7 @@ function handleSubmitGuess() {
         
         if (attemptNumber === 1) myHistoryContainer.innerHTML = '';
         appendHistoryItem(myHistoryContainer, attemptNumber, currentGuess, strikes, balls);
+        speakResult(strikes, balls);
 
         currentGuess = [];
         updateSlots();
@@ -1232,6 +1320,7 @@ function handleSubmitGuess() {
 
             if (attemptNumber === 1) myHistoryContainer.innerHTML = '';
             appendHistoryItem(myHistoryContainer, attemptNumber, currentGuess, strikes, balls);
+            speakResult(strikes, balls);
 
             currentGuess = [];
             updateSlots();
