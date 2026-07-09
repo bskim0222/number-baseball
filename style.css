@@ -949,11 +949,12 @@ body {
 
 .history-list {
     flex: 1;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding-right: 2px;
+    overflow-y: hidden;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-content: start;
+    gap: 5px;
+    padding-right: 0;
 }
 
 /* Scrollbar inside column */
@@ -971,6 +972,7 @@ body {
 }
 
 .empty-placeholder-mini {
+    grid-column: 1 / -1;
     font-size: 0.75rem;
     color: var(--text-muted);
     text-align: center;
@@ -980,48 +982,56 @@ body {
 
 /* Mini history items inside split view */
 .history-item {
-    display: flex;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    grid-template-areas:
+        "index result"
+        "guess guess";
     align-items: center;
     background: rgba(255, 255, 255, 0.02);
     border: 1px solid rgba(255, 255, 255, 0.04);
     border-radius: var(--radius-sm);
-    padding: 6px 8px;
-    animation: slideInUp 0.25s ease-out;
+    padding: 4px 5px;
+    min-height: 42px;
 }
 
 .history-index {
+    grid-area: index;
     font-family: var(--font-numeric);
-    font-size: 0.7rem;
+    font-size: 0.62rem;
     color: var(--text-muted);
-    width: 18px;
+    width: auto;
 }
 
 .history-guess {
+    grid-area: guess;
     font-family: var(--font-numeric);
-    font-size: 0.95rem;
+    font-size: 0.78rem;
     font-weight: 700;
-    letter-spacing: 2px;
+    letter-spacing: 1px;
     color: var(--text-main);
-    flex: 1;
     text-align: left;
-    padding-left: 4px;
+    padding-left: 0;
+    white-space: nowrap;
 }
 
 .history-result {
+    grid-area: result;
     display: flex;
-    gap: 4px;
+    gap: 2px;
+    justify-content: flex-end;
+    min-width: 0;
 }
 
 /* Badges for Strike, Ball, Out */
 .badge {
     font-family: var(--font-numeric);
-    font-size: 0.7rem;
+    font-size: 0.62rem;
     font-weight: 700;
-    padding: 2px 4px;
+    padding: 1px 3px;
     border-radius: 4px;
     text-align: center;
-    min-width: 22px;
+    min-width: 18px;
 }
 
 .badge.strike {

@@ -36,6 +36,8 @@ let myRole = ''; // 'host' or 'guest'
 let pollInterval = null;
 let lobbyInterval = null; // Used to poll waiting room list in lobby
 let lastRoomDataJson = ''; // Used to prevent redundant redraws
+let lastMyGuessesJson = '';
+let lastOppGuessesJson = '';
 
 // Mock Leaderboard for Offline Fallback
 const mockRankings = [
@@ -134,6 +136,49 @@ function safeAddListener(idOrEl, event, callback) {
     }
 }
 
+function toSafeNumber(value, fallback = 0) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+}
+
+function normalizePlayerStats(player) {
+    const wins = Math.max(0, Math.floor(toSafeNumber(player && player.wins)));
+    const losses = Math.max(0, Math.floor(toSafeNumber(player && player.losses)));
+    const total = wins + losses;
+    const calculatedRate = total > 0 ? parseFloat(((wins / total) * 100).toFixed(1)) : 0;
+    const rate = Number.isFinite(Number(player && player.rate)) ? Number(player.rate) : calculatedRate;
+
+    return {
+        ...player,
+        wins,
+        losses,
+        rate: total > 0 ? rate : 0
+    };
+}
+
+function mergePlayerProfile(profile) {
+    myPlayer = normalizePlayerStats({
+        ...myPlayer,
+        ...profile,
+        wins: profile && profile.wins !== undefined ? profile.wins : myPlayer.wins,
+        losses: profile && profile.losses !== undefined ? profile.losses : myPlayer.losses,
+        rate: profile && profile.rate !== undefined ? profile.rate : myPlayer.rate
+    });
+}
+
+function updateLobbyProfileName() {
+    const nameEl = document.getElementById('lobby-profile-name');
+    if (nameEl) {
+        nameEl.innerHTML = `${myPlayer.name || '게스트'} <i class="fa-solid fa-pen-to-square edit-icon" style="font-size: 0.8rem; margin-left: 5px; opacity: 0.6;"></i>`;
+    }
+}
+
+function resetRealtimeRenderCache() {
+    lastRoomDataJson = '';
+    lastMyGuessesJson = '';
+    lastOppGuessesJson = '';
+}
+
 /* ==========================================================================
    INITIALIZATION (유저 로그인 및 초기 연결)
    ========================================================================== */
@@ -156,8 +201,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 1. Initialize Profile via TossBridge
     TossBridge.getProfile().then(profile => {
-        myPlayer = profile;
-        document.getElementById('lobby-profile-name').innerHTML = `${myPlayer.name} <i class="fa-solid fa-pen-to-square edit-icon" style="font-size: 0.8rem; margin-left: 5px; opacity: 0.6;"></i>`;
+        mergePlayerProfile(profile);
+        updateLobbyProfileName();
         
         // Load stats from local server or localStorage
         syncPlayerStats();
@@ -240,8 +285,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (newName && newName.trim().length >= 2) {
                 TossBridge.updateProfileName(newName).then(updated => {
                     if (updated) {
-                        myPlayer = updated;
-                        document.getElementById('lobby-profile-name').innerHTML = `${myPlayer.name} <i class="fa-solid fa-pen-to-square edit-icon" style="font-size: 0.8rem; margin-left: 5px; opacity: 0.6;"></i>`;
+                        mergePlayerProfile(updated);
+                        updateLobbyProfileName();
                         
                         // Sync with local server
                         saveRankingToServer();
@@ -295,7 +340,7 @@ function autoJoinRoomFromUrl(inputCode) {
         window.history.replaceState({}, document.title, newUrl);
 
         // Start polling room state
-        lastRoomDataJson = '';
+        resetRealtimeRenderCache();
         pollInterval = setInterval(pollRoomState, 800);
         showScreen('screen-waiting');
     })
@@ -419,6 +464,13 @@ function saveRankingToServer() {
 }
 
 function updateLobbyStatsUI() {
+    myPlayer = normalizePlayerStats(myPlayer);
+    const safeStatsEl = document.getElementById('lobby-profile-stats');
+    if (safeStatsEl) {
+        safeStatsEl.textContent = `전적: ${myPlayer.wins}승 ${myPlayer.losses}패 (승률 ${myPlayer.rate}%)`;
+    }
+    return;
+    myPlayer = normalizePlayerStats(myPlayer);
     const statsEl = document.getElementById('lobby-profile-stats');
     if (statsEl) {
         statsEl.textContent = `전적: ${myPlayer.wins}승 ${myPlayer.losses}패 (승률 ${myPlayer.rate}%)`;
@@ -553,7 +605,7 @@ safeAddListener('btn-menu-create', 'click', () => {
         document.getElementById('room-code-value').textContent = currentRoomCode;
 
         // Start polling room state
-        lastRoomDataJson = '';
+        resetRealtimeRenderCache();
         pollInterval = setInterval(pollRoomState, 800);
         showScreen('screen-waiting');
     })
@@ -629,7 +681,7 @@ safeAddListener('btn-submit-join', 'click', () => {
         closeModal(joinModal);
         
         // Start polling room state
-        lastRoomDataJson = '';
+        resetRealtimeRenderCache();
         pollInterval = setInterval(pollRoomState, 800);
         
         showScreen('screen-waiting');
@@ -676,8 +728,18 @@ function pollRoomState() {
             if (timerContainer) timerContainer.style.display = 'none';
         }
 
-        // 2. Prevent redundant redraws if room state is unchanged
-        const roomJson = JSON.stringify(room);
+        // 2. Prevent redundant redraws if visible game state is unchanged.
+        // Poll updates player lastActive frequently, but that should not redraw attack history.
+        const roomJson = JSON.stringify({
+            status: room.status,
+            currentTurn: room.currentTurn,
+            winner: room.winner,
+            reason: room.reason,
+            host: room.host ? { name: room.host.name, status: room.host.status } : null,
+            guest: room.guest ? { name: room.guest.name, status: room.guest.status } : null,
+            guesses: room.guesses,
+            secrets: room.secrets
+        });
         if (roomJson === lastRoomDataJson) return;
         lastRoomDataJson = roomJson;
 
@@ -844,6 +906,50 @@ function setTurnState(isMe) {
  */
 function syncRealtimeGuesses(room) {
     if (!room.guesses) return;
+
+    const renderHistoryList = (container, guesses, emptyText) => {
+        container.innerHTML = '';
+        if (guesses.length === 0) {
+            container.innerHTML = `<div class="empty-placeholder-mini">${emptyText}</div>`;
+            return;
+        }
+
+        guesses.forEach(item => {
+            appendHistoryItem(container, item.attempt, item.guess, item.strikes, item.balls);
+        });
+    };
+
+    const cachedMyGuesses = room.guesses[myRole]
+        ? Object.values(room.guesses[myRole]).sort((a, b) => a.attempt - b.attempt)
+        : [];
+    const cachedMyGuessesJson = JSON.stringify(cachedMyGuesses);
+    if (cachedMyGuessesJson !== lastMyGuessesJson) {
+        lastMyGuessesJson = cachedMyGuessesJson;
+        renderHistoryList(myHistoryContainer, cachedMyGuesses, '아직 기록이 없습니다.');
+    }
+
+    attemptsLeft = MAX_ATTEMPTS - cachedMyGuesses.length;
+    attemptsLeftEl.textContent = attemptsLeft;
+
+    if (cachedMyGuesses.length > 0) {
+        const lastGuess = cachedMyGuesses[cachedMyGuesses.length - 1];
+        updateScoreboardLeds(lastGuess.guess, lastGuess.strikes, lastGuess.balls);
+    } else {
+        updateScoreboardLeds(null, 0, 0);
+    }
+
+    const cachedOppRole = myRole === 'host' ? 'guest' : 'host';
+    const cachedOppGuesses = room.guesses[cachedOppRole]
+        ? Object.values(room.guesses[cachedOppRole]).sort((a, b) => a.attempt - b.attempt)
+        : [];
+    const cachedOppGuessesJson = JSON.stringify(cachedOppGuesses);
+    if (cachedOppGuessesJson !== lastOppGuessesJson) {
+        lastOppGuessesJson = cachedOppGuessesJson;
+        renderHistoryList(oppHistoryContainer, cachedOppGuesses, '상대방의 공격을 기다리는 중...');
+    }
+
+    setTurnState(room.currentTurn === myRole);
+    return;
 
     // 1. My Guesses History Render
     const myGuesses = room.guesses[myRole] ? Object.values(room.guesses[myRole]) : [];
@@ -1202,7 +1308,6 @@ function appendHistoryItem(container, attempt, guessArr, strikes, balls) {
     `;
 
     container.appendChild(item);
-    container.scrollTop = container.scrollHeight;
 }
 
 /* ==========================================================================
