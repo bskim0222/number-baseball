@@ -102,7 +102,6 @@ function buildPublicRoomState(room, role) {
         turnDurationMs: TURN_TIMEOUT_MS,
         disconnectGraceMs: HEARTBEAT_STALE_MS + DISCONNECT_GRACE_MS,
         statsRecorded: room.statsRecorded,
-        ratingChange: room.ratingChanges ? room.ratingChanges[role] || 0 : 0,
         playerStats: player ? player.stats || null : null,
         secrets: filteredSecrets
     };
@@ -151,10 +150,6 @@ async function recordRankedMatch(room) {
     room[winnerRole].stats = result.winner;
     room[loserRole].stats = result.loser;
     room.statsRecorded = true;
-    room.ratingChanges = {
-        [winnerRole]: result.ratingChange,
-        [loserRole]: -result.ratingChange
-    };
 }
 
 async function finishRoom(room, winner, reason) {
@@ -300,7 +295,6 @@ app.get('/api/rankings', ...protectedApi, asyncRoute(async (req, res) => {
         losses: player.losses,
         games: player.games,
         rate: player.rate,
-        rating: player.rating,
         seasonId: player.seasonId,
         seasonName: player.seasonName,
         isMe: player.id === req.user.id
@@ -336,8 +330,7 @@ app.post('/api/create', ...protectedApi, asyncRoute(async (req, res) => {
         startedAt: null,
         finishedAt: null,
         statsRecorded: false,
-        statsPromise: null,
-        ratingChanges: null
+        statsPromise: null
     };
     console.log(`[API] Room created: ${roomCode} by ${profile.name}`);
     res.json(buildPublicRoomState(rooms[roomCode], 'host'));

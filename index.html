@@ -158,6 +158,7 @@
                     <span id="my-rank-position" class="my-rank-value">집계 중</span>
                     <span id="my-rank-detail" class="my-rank-rate">대전 기록을 불러오고 있습니다.</span>
                 </div>
+                <p class="ranking-rule"><i class="fa-solid fa-circle-info"></i> 순위 기준: 승수 → 승률 → 패수 적은 순</p>
             </section>
 
             <section class="ranking-board">
@@ -485,7 +486,7 @@
             </div>
             <div class="account-record-card">
                 <span>현재 시즌 전적</span>
-                <strong id="account-record-value">0승 0패 · 1000점</strong>
+                <strong id="account-record-value">0승 0패 · 승률 0%</strong>
             </div>
             <div class="account-danger-actions">
                 <button id="btn-reset-record" class="account-action-btn warning">
@@ -525,6 +526,6 @@
     <script src="firebase-config.js"></script>
 
     <!-- Main Game Logic -->
-    <script src="app.js?v=20260814-v6-auth-db"></script>
+    <script src="app.js?v=20260814-v6-record-ranking"></script>
 </body>
 </html>

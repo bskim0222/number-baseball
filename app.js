@@ -39,7 +39,7 @@ let isMyTurn = true;
 let isGameOver = false;
 
 // Player Profile
-let myPlayer = { name: "로딩 중...", id: "LOCAL-GUEST", avatar: "fa-solid fa-circle-user", wins: 0, losses: 0, rate: 0, rating: 1000 };
+let myPlayer = { name: "로딩 중...", id: "LOCAL-GUEST", avatar: "fa-solid fa-circle-user", wins: 0, losses: 0, rate: 0 };
 let opponentPlayer = null;
 
 // Room Info
@@ -240,18 +240,12 @@ function normalizePlayerStats(player) {
     const losses = Math.max(0, Math.floor(toSafeNumber(player && player.losses)));
     const total = wins + losses;
     const calculatedRate = total > 0 ? parseFloat(((wins / total) * 100).toFixed(1)) : 0;
-    const suppliedRating = Number(player && player.rating);
-    const rating = Number.isFinite(suppliedRating)
-        ? Math.max(100, Math.round(suppliedRating))
-        : Math.max(100, 1000 + ((wins - losses) * 16));
-
     return {
         ...player,
         wins,
         losses,
         games: total,
-        rate: calculatedRate,
-        rating
+        rate: calculatedRate
     };
 }
 
@@ -261,8 +255,7 @@ function mergePlayerProfile(profile) {
         ...profile,
         wins: profile && profile.wins !== undefined ? profile.wins : myPlayer.wins,
         losses: profile && profile.losses !== undefined ? profile.losses : myPlayer.losses,
-        rate: profile && profile.rate !== undefined ? profile.rate : myPlayer.rate,
-        rating: profile && profile.rating !== undefined ? profile.rating : myPlayer.rating
+        rate: profile && profile.rate !== undefined ? profile.rate : myPlayer.rate
     });
 }
 
@@ -285,7 +278,6 @@ function persistLocalStats() {
             wins: stats.wins,
             losses: stats.losses,
             rate: stats.rate,
-            rating: stats.rating,
             updatedAt: Date.now()
         }));
     } catch (error) {
@@ -521,7 +513,7 @@ document.addEventListener('DOMContentLoaded', () => {
         profileBar.addEventListener('click', () => {
             if (accountNicknameInput) accountNicknameInput.value = myPlayer.name || '';
             if (accountRecordValue) {
-                accountRecordValue.textContent = `${myPlayer.wins}승 ${myPlayer.losses}패 · ${myPlayer.rating}점`;
+                accountRecordValue.textContent = `${myPlayer.wins}승 ${myPlayer.losses}패 · 승률 ${myPlayer.rate}%`;
             }
             openModal(accountModal);
         });
@@ -715,7 +707,7 @@ function updateMyRankSummary(players) {
     const percentile = Math.max(1, Math.ceil((rank / rankedPlayers.length) * 100));
     const record = rankedPlayers[myIndex];
     rankValue.textContent = `${rank}위`;
-    rankDetail.textContent = `상위 ${percentile}% · 레이팅 ${record.rating}점`;
+    rankDetail.textContent = `상위 ${percentile}% · ${record.wins}승 ${record.losses}패 · 승률 ${record.rate}%`;
 }
 
 /**
@@ -730,8 +722,8 @@ function initRankings() {
                 isMe: Boolean(player.isMe)
             }));
             normalizedPlayers.sort((a, b) => (
-                b.rating - a.rating
-                || b.wins - a.wins
+                b.wins - a.wins
+                || b.rate - a.rate
                 || a.losses - b.losses
             ));
 
@@ -923,7 +915,7 @@ safeAddListener('btn-save-account-name', 'click', () => {
 safeAddListener('btn-reset-record', 'click', () => {
     showConfirmDialog({
         title: '현재 시즌 전적 초기화',
-        message: '승패와 레이팅을 0승 0패, 1000점으로 초기화합니다.',
+        message: '현재 시즌의 승패 기록을 0승 0패로 초기화합니다.',
         confirmText: '초기화',
         icon: 'fa-rotate-left'
     }).then(confirmed => {
@@ -938,7 +930,7 @@ safeAddListener('btn-reset-record', 'click', () => {
         mergePlayerProfile(response.player);
         persistLocalStats();
         updateLobbyStatsUI();
-        if (accountRecordValue) accountRecordValue.textContent = '0승 0패 · 1000점';
+        if (accountRecordValue) accountRecordValue.textContent = '0승 0패 · 승률 0%';
         showToast('현재 시즌 전적을 초기화했습니다.', 'success');
     }).catch(error => showToast(error.message, 'error'));
 });
@@ -1103,8 +1095,7 @@ async function pollRoomState() {
             guest: room.guest ? { name: room.guest.name, status: room.guest.status } : null,
             guesses: room.guesses,
             secrets: room.secrets,
-            playerStats: room.playerStats,
-            ratingChange: room.ratingChange
+            playerStats: room.playerStats
         });
         if (roomJson === lastRoomDataJson) return;
         lastRoomDataJson = roomJson;
@@ -1154,8 +1145,7 @@ async function pollRoomState() {
                 myGuessesList.length,
                 room.winner !== myRole,
                 room.reason,
-                room.playerStats,
-                room.ratingChange
+                room.playerStats
             );
         }
     } catch (error) {
@@ -1736,7 +1726,7 @@ function applyCompletedMatchStats(isWin, serverStats) {
     syncPlayerStats();
 }
 
-function endGame(isWin, attemptsUsed, isOpponentWin = false, reason = "win", serverStats = null, ratingChange = 0) {
+function endGame(isWin, attemptsUsed, isOpponentWin = false, reason = "win", serverStats = null) {
     try {
         isGameOver = true;
         disableKeypad();
@@ -1798,10 +1788,6 @@ function endGame(isWin, attemptsUsed, isOpponentWin = false, reason = "win", ser
             }
 
             applyCompletedMatchStats(isWin, serverStats);
-            if (ratingChange) {
-                const sign = ratingChange > 0 ? '+' : '';
-                resultMessage.textContent += ` 레이팅 ${sign}${ratingChange}점`;
-            }
         }
 
         setTimeout(() => {
@@ -1885,7 +1871,7 @@ function renderLeaderboard(playersList) {
         tr.innerHTML = `
             <td>${rankBadge}</td>
             <td><span class="rank-name ${player.isMe ? 'me' : ''}"></span></td>
-            <td><span class="rank-table-stats">${player.wins}승 ${player.losses}패</span><small class="rank-rating">${player.rating}점</small></td>
+            <td><span class="rank-table-stats">${player.wins}승 ${player.losses}패</span></td>
             <td><span class="rank-table-rate ${player.rate >= 75 ? 'high' : ''}">${player.rate}%</span></td>
         `;
         tr.querySelector('.rank-name').textContent = `${player.name}${player.isMe ? ' (나)' : ''}`;

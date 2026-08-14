@@ -372,6 +372,18 @@ body {
     color: var(--neon-blue);
 }
 
+.ranking-rule {
+    margin: 10px 0 0;
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    text-align: center;
+}
+
+.ranking-rule i {
+    margin-right: 4px;
+    color: var(--neon-blue);
+}
+
 .ranking-board {
     background: var(--bg-card);
     border: 1px solid rgba(255, 255, 255, 0.05);
@@ -458,15 +470,6 @@ body {
     font-family: var(--font-numeric);
     color: var(--text-muted);
     font-size: 0.85rem;
-}
-
-.rank-rating {
-    display: block;
-    margin-top: 2px;
-    color: var(--neon-gold);
-    font-family: var(--font-numeric);
-    font-size: 0.68rem;
-    font-weight: 700;
 }
 
 .rank-table-rate {

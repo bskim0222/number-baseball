@@ -5,7 +5,7 @@ process.env.NODE_ENV = 'test';
 process.env.ADMIN_API_TOKEN = 'test-admin-token';
 
 const { app, _internals } = require('./server');
-const { createPostgresPoolOptions } = require('./database');
+const { createPostgresPoolOptions, MemoryStore } = require('./database');
 
 const HOST_ID = '11111111-1111-4111-8111-111111111111';
 const GUEST_ID = '22222222-2222-4222-8222-222222222222';
@@ -22,6 +22,28 @@ test('Postgres connection verifies the Supabase CA and pooler hostname', () => {
     assert.equal(options.ssl.servername, 'aws-0-ap-southeast-1.pooler.supabase.com');
     assert.match(options.ssl.ca, /BEGIN CERTIFICATE/);
     assert.equal(options.connectionString.includes('sslmode='), false);
+});
+
+test('rankings use wins, win rate, and fewer losses without a score', async () => {
+    const store = new MemoryStore();
+    const match = (matchId, winnerId, loserId) => store.recordMatch({
+        matchId,
+        roomCode: matchId,
+        winnerId,
+        winnerName: winnerId,
+        loserId,
+        loserName: loserId,
+        reason: 'win'
+    });
+    await match('m1', 'A', 'B');
+    await match('m2', 'A', 'C');
+    await match('m3', 'C', 'A');
+    await match('m4', 'C', 'B');
+    await match('m5', 'B', 'C');
+
+    const rankings = await store.listRankings();
+    assert.deepEqual(rankings.map(player => player.name), ['A', 'C', 'B']);
+    assert.equal(rankings.some(player => Object.hasOwn(player, 'rating')), false);
 });
 
 async function request(route, options = {}, userId = HOST_ID) {
@@ -87,7 +109,7 @@ test('authenticated match records both players exactly once', async () => {
     assert.equal(finished.winner, 'guest');
     assert.equal(finished.statsRecorded, true);
     assert.deepEqual([finished.playerStats.wins, finished.playerStats.losses], [1, 0]);
-    assert.equal(finished.ratingChange, 16);
+    assert.equal(Object.hasOwn(finished, 'ratingChange'), false);
 
     await api(`/api/poll?room=${room.code}&role=host`, {}, HOST_ID);
     await api(`/api/poll?room=${room.code}&role=guest`, {}, GUEST_ID);
@@ -111,14 +133,15 @@ test('the removed client-controlled ranking endpoint cannot change records', asy
     }, HOST_ID);
     assert.equal(response.status, 410);
     const profile = await api('/api/me', {}, HOST_ID);
-    assert.deepEqual([profile.player.wins, profile.player.losses, profile.player.rating], [0, 1, 984]);
+    assert.deepEqual([profile.player.wins, profile.player.losses], [0, 1]);
+    assert.equal(Object.hasOwn(profile.player, 'rating'), false);
 });
 
 test('a player can reset only the current season record', async () => {
     const reset = await api('/api/me/record', {
         method: 'DELETE', body: JSON.stringify({ confirmation: 'RESET' })
     }, HOST_ID);
-    assert.deepEqual([reset.player.wins, reset.player.losses, reset.player.rating], [0, 0, 1000]);
+    assert.deepEqual([reset.player.wins, reset.player.losses], [0, 0]);
 });
 
 test('starting a new season preserves accounts and begins fresh rankings', async () => {
@@ -129,7 +152,7 @@ test('starting a new season preserves accounts and begins fresh rankings', async
     }, HOST_ID);
     assert.equal(result.season.name, '테스트 시즌 2');
     const profile = await api('/api/me', {}, GUEST_ID);
-    assert.deepEqual([profile.player.wins, profile.player.losses, profile.player.rating], [0, 0, 1000]);
+    assert.deepEqual([profile.player.wins, profile.player.losses], [0, 0]);
 });
 
 test('disconnect requires an active opponent and the full grace period', async () => {

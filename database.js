@@ -21,15 +21,9 @@ function publicPlayer(record) {
         losses,
         games: wins + losses,
         rate: calculateRate(wins, losses),
-        rating: Math.max(100, Number(record.rating) || 1000),
         seasonId: Number(record.season_id || record.seasonId || 1),
         seasonName: record.season_name || record.seasonName || '시즌 1'
     };
-}
-
-function calculateRatingChange(winnerRating, loserRating) {
-    const winnerExpected = 1 / (1 + Math.pow(10, (loserRating - winnerRating) / 400));
-    return Math.max(8, Math.round(32 * (1 - winnerExpected)));
 }
 
 class MemoryStore {
@@ -52,14 +46,14 @@ class MemoryStore {
         current.name = safePlayerName(name || current.name);
         current.deleted = false;
         this.players.set(id, current);
-        if (!this.stats.has(id)) this.stats.set(id, { wins: 0, losses: 0, rating: 1000 });
+        if (!this.stats.has(id)) this.stats.set(id, { wins: 0, losses: 0 });
         return this.getPlayer(id);
     }
 
     async getPlayer(id) {
         const player = this.players.get(id);
         if (!player || player.deleted) return null;
-        const stats = this.stats.get(id) || { wins: 0, losses: 0, rating: 1000 };
+        const stats = this.stats.get(id) || { wins: 0, losses: 0 };
         return publicPlayer({ ...player, ...stats, seasonId: this.season.id, seasonName: this.season.name });
     }
 
@@ -76,35 +70,31 @@ class MemoryStore {
             const player = await this.getPlayer(id);
             if (player) list.push(player);
         }
-        return list.sort((a, b) => b.rating - a.rating || b.wins - a.wins || a.losses - b.losses || a.name.localeCompare(b.name, 'ko'));
+        return list.sort((a, b) => b.wins - a.wins || b.rate - a.rate || a.losses - b.losses || a.name.localeCompare(b.name, 'ko'));
     }
 
     async recordMatch(match) {
         if (this.matches.has(match.matchId)) {
-            return { duplicate: true, winner: await this.getPlayer(match.winnerId), loser: await this.getPlayer(match.loserId), ratingChange: 0 };
+            return { duplicate: true, winner: await this.getPlayer(match.winnerId), loser: await this.getPlayer(match.loserId) };
         }
         this.matches.add(match.matchId);
         await this.ensurePlayer(match.winnerId, match.winnerName);
         await this.ensurePlayer(match.loserId, match.loserName);
         const winnerStats = this.stats.get(match.winnerId);
         const loserStats = this.stats.get(match.loserId);
-        const ratingChange = calculateRatingChange(winnerStats.rating, loserStats.rating);
         winnerStats.wins += 1;
-        winnerStats.rating += ratingChange;
         loserStats.losses += 1;
-        loserStats.rating = Math.max(100, loserStats.rating - ratingChange);
         return {
             duplicate: false,
             winner: await this.getPlayer(match.winnerId),
-            loser: await this.getPlayer(match.loserId),
-            ratingChange
+            loser: await this.getPlayer(match.loserId)
         };
     }
 
     async resetPlayer(id) {
-        const previous = this.stats.get(id) || { wins: 0, losses: 0, rating: 1000 };
+        const previous = this.stats.get(id) || { wins: 0, losses: 0 };
         this.resets.push({ id, ...previous, seasonId: this.season.id, createdAt: Date.now() });
-        this.stats.set(id, { wins: 0, losses: 0, rating: 1000 });
+        this.stats.set(id, { wins: 0, losses: 0 });
         return this.getPlayer(id);
     }
 
@@ -186,7 +176,7 @@ class PostgresStore {
 
     async getPlayer(id) {
         const result = await this.pool.query(
-            `select p.id, p.nickname, s.wins, s.losses, s.rating,
+            `select p.id, p.nickname, s.wins, s.losses,
                     season.id as season_id, season.name as season_name
              from hb_players p
              join hb_seasons season on season.is_active = true
@@ -194,7 +184,7 @@ class PostgresStore {
              where p.id = $1 and p.deleted_at is null`,
             [id]
         );
-        return result.rows[0] ? publicPlayer({ ...result.rows[0], wins: result.rows[0].wins || 0, losses: result.rows[0].losses || 0, rating: result.rows[0].rating || 1000 }) : null;
+        return result.rows[0] ? publicPlayer({ ...result.rows[0], wins: result.rows[0].wins || 0, losses: result.rows[0].losses || 0 }) : null;
     }
 
     async updateName(id, name) {
@@ -207,13 +197,17 @@ class PostgresStore {
 
     async listRankings() {
         const result = await this.pool.query(
-            `select p.id, p.nickname, s.wins, s.losses, s.rating,
+            `select p.id, p.nickname, s.wins, s.losses,
                     season.id as season_id, season.name as season_name
              from hb_players p
              join hb_seasons season on season.is_active = true
              join hb_player_season_stats s on s.player_id = p.id and s.season_id = season.id
              where p.deleted_at is null
-             order by s.rating desc, s.wins desc, s.losses asc, p.nickname asc`
+             order by s.wins desc,
+                      case when s.wins + s.losses > 0
+                           then s.wins::numeric / (s.wins + s.losses)
+                           else 0 end desc,
+                      s.losses asc, p.nickname asc`
         );
         return result.rows.map(publicPlayer);
     }
@@ -247,40 +241,26 @@ class PostgresStore {
             );
             if (!inserted.rows[0]) {
                 await client.query('rollback');
-                return { duplicate: true, winner: await this.getPlayer(match.winnerId), loser: await this.getPlayer(match.loserId), ratingChange: 0 };
+                return { duplicate: true, winner: await this.getPlayer(match.winnerId), loser: await this.getPlayer(match.loserId) };
             }
 
-            const ids = [match.winnerId, match.loserId].sort();
-            const locked = await client.query(
-                `select player_id, wins, losses, rating from hb_player_season_stats
-                 where season_id = $1 and player_id = any($2::uuid[])
-                 order by player_id for update`,
-                [season.id, ids]
-            );
-            const byId = Object.fromEntries(locked.rows.map(row => [row.player_id, row]));
-            const winner = byId[match.winnerId];
-            const loser = byId[match.loserId];
-            const ratingChange = calculateRatingChange(Number(winner.rating), Number(loser.rating));
-
             await client.query(
                 `update hb_player_season_stats
-                 set wins = wins + 1, rating = rating + $3, updated_at = now()
+                 set wins = wins + 1, updated_at = now()
                  where player_id = $1 and season_id = $2`,
-                [match.winnerId, season.id, ratingChange]
+                [match.winnerId, season.id]
             );
             await client.query(
                 `update hb_player_season_stats
-                 set losses = losses + 1, rating = greatest(100, rating - $3), updated_at = now()
+                 set losses = losses + 1, updated_at = now()
                  where player_id = $1 and season_id = $2`,
-                [match.loserId, season.id, ratingChange]
+                [match.loserId, season.id]
             );
-            await client.query('update hb_matches set rating_change = $2 where match_id = $1', [match.matchId, ratingChange]);
             await client.query('commit');
             return {
                 duplicate: false,
                 winner: await this.getPlayer(match.winnerId),
-                loser: await this.getPlayer(match.loserId),
-                ratingChange
+                loser: await this.getPlayer(match.loserId)
             };
         } catch (error) {
             await client.query('rollback');
@@ -377,7 +357,6 @@ function createDataStore(options = {}) {
 module.exports = {
     MemoryStore,
     PostgresStore,
-    calculateRatingChange,
     createPostgresPoolOptions,
     createDataStore,
     publicPlayer,
