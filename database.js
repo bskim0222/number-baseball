@@ -124,14 +124,30 @@ class MemoryStore {
     }
 }
 
+function createPostgresPoolOptions(databaseUrl) {
+    const connectionUrl = new URL(databaseUrl);
+    connectionUrl.searchParams.delete('sslmode');
+    connectionUrl.searchParams.delete('uselibpqcompat');
+    const isLocal = ['localhost', '127.0.0.1'].includes(connectionUrl.hostname);
+    const options = {
+        connectionString: connectionUrl.toString(),
+        max: 5,
+        ssl: false
+    };
+    if (!isLocal) {
+        options.ssl = {
+            ca: fs.readFileSync(path.join(__dirname, 'supabase-prod-ca-2021.crt'), 'utf8'),
+            rejectUnauthorized: true,
+            servername: connectionUrl.hostname
+        };
+    }
+    return options;
+}
+
 class PostgresStore {
     constructor(databaseUrl) {
         const { Pool } = require('pg');
-        this.pool = new Pool({
-            connectionString: databaseUrl,
-            max: 5,
-            ssl: /localhost|127\.0\.0\.1/.test(databaseUrl) ? false : { rejectUnauthorized: false }
-        });
+        this.pool = new Pool(createPostgresPoolOptions(databaseUrl));
     }
 
     async init() {
@@ -362,6 +378,7 @@ module.exports = {
     MemoryStore,
     PostgresStore,
     calculateRatingChange,
+    createPostgresPoolOptions,
     createDataStore,
     publicPlayer,
     safePlayerName

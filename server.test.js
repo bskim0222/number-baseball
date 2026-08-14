@@ -5,6 +5,7 @@ process.env.NODE_ENV = 'test';
 process.env.ADMIN_API_TOKEN = 'test-admin-token';
 
 const { app, _internals } = require('./server');
+const { createPostgresPoolOptions } = require('./database');
 
 const HOST_ID = '11111111-1111-4111-8111-111111111111';
 const GUEST_ID = '22222222-2222-4222-8222-222222222222';
@@ -12,6 +13,16 @@ const OUTSIDER_ID = '33333333-3333-4333-8333-333333333333';
 
 let server;
 let baseUrl;
+
+test('Postgres connection verifies the Supabase CA and pooler hostname', () => {
+    const options = createPostgresPoolOptions(
+        'postgresql://postgres.project:password@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require'
+    );
+    assert.equal(options.ssl.rejectUnauthorized, true);
+    assert.equal(options.ssl.servername, 'aws-0-ap-southeast-1.pooler.supabase.com');
+    assert.match(options.ssl.ca, /BEGIN CERTIFICATE/);
+    assert.equal(options.connectionString.includes('sslmode='), false);
+});
 
 async function request(route, options = {}, userId = HOST_ID) {
     const response = await fetch(`${baseUrl}${route}`, {
