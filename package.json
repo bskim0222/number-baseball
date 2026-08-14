@@ -1,10 +1,11 @@
 {
-  "name": "toss-baseball-multiplayer",
+  "name": "homerunbaseball-multiplayer",
   "version": "1.0.0",
-  "description": "Number Baseball Multiplayer Game with Toss Bridge Integration",
+  "description": "Number Baseball Multiplayer Game with REST API integration",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test server.test.js"
   },
   "dependencies": {
     "express": "^4.19.2",

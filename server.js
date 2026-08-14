@@ -10,11 +10,18 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
-// Memory Storage for active rooms and rankings
 let rooms = {};
 let rankings = {};
-const RANKINGS_FILE = path.join(__dirname, 'rankings.json');
+
 const DIGIT_COUNT = 4;
+const TURN_TIMEOUT_MS = 60_000;
+const HEARTBEAT_STALE_MS = 5_000;
+const DISCONNECT_GRACE_MS = 25_000;
+const WAITING_ROOM_VISIBLE_MS = 30_000;
+const FINISHED_ROOM_RETENTION_MS = 10 * 60_000;
+const RANKINGS_FILE = process.env.RANKINGS_FILE || path.join(__dirname, 'rankings.json');
+
+let rankingWriteQueue = Promise.resolve();
 
 function normalizeDigits(value) {
     if (!Array.isArray(value)) return [];
@@ -23,7 +30,9 @@ function normalizeDigits(value) {
 
 function isValidDigits(value) {
     const digits = normalizeDigits(value);
-    return digits.length === DIGIT_COUNT && new Set(digits).size === DIGIT_COUNT && digits.every(digit => digit >= 0 && digit <= 9);
+    return digits.length === DIGIT_COUNT
+        && new Set(digits).size === DIGIT_COUNT
+        && digits.every(digit => digit >= 0 && digit <= 9);
 }
 
 function calculateScore(guess, secret) {
@@ -43,75 +52,311 @@ function calculateScore(guess, secret) {
     return { strikes, balls };
 }
 
+function safeInteger(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : 0;
+}
+
+function safePlayerId(value) {
+    return typeof value === 'string' ? value.trim().slice(0, 80) : '';
+}
+
+function safePlayerName(value) {
+    const name = typeof value === 'string' ? value.trim().slice(0, 12) : '';
+    return name || '야구유저';
+}
+
+function calculateRate(wins, losses) {
+    const total = wins + losses;
+    return total > 0 ? Number(((wins / total) * 100).toFixed(1)) : 0;
+}
+
+function defaultRating(wins, losses) {
+    return Math.max(100, 1000 + ((wins - losses) * 16));
+}
+
+function normalizeRanking(record, fallbackId = '') {
+    const wins = safeInteger(record && record.wins);
+    const losses = safeInteger(record && record.losses);
+    const suppliedRating = Number(record && record.rating);
+
+    return {
+        id: safePlayerId((record && record.id) || fallbackId),
+        name: safePlayerName(record && record.name),
+        wins,
+        losses,
+        rate: calculateRate(wins, losses),
+        rating: Number.isFinite(suppliedRating)
+            ? Math.max(100, Math.round(suppliedRating))
+            : defaultRating(wins, losses),
+        updatedAt: Number(record && record.updatedAt) || Date.now()
+    };
+}
+
+function publicRanking(record) {
+    const normalized = normalizeRanking(record);
+    return {
+        id: normalized.id,
+        name: normalized.name,
+        wins: normalized.wins,
+        losses: normalized.losses,
+        games: normalized.wins + normalized.losses,
+        rate: normalized.rate,
+        rating: normalized.rating
+    };
+}
+
+function sortRankings(list) {
+    return list.sort((a, b) => (
+        b.rating - a.rating
+        || b.wins - a.wins
+        || a.losses - b.losses
+        || a.name.localeCompare(b.name, 'ko')
+    ));
+}
+
+function persistRankings() {
+    const snapshot = JSON.stringify(rankings, null, 2);
+    rankingWriteQueue = rankingWriteQueue
+        .catch(() => {})
+        .then(async () => {
+            await fs.promises.mkdir(path.dirname(RANKINGS_FILE), { recursive: true });
+            await fs.promises.writeFile(RANKINGS_FILE, snapshot, 'utf8');
+        })
+        .catch(error => {
+            console.error('Failed to save rankings:', error);
+        });
+    return rankingWriteQueue;
+}
+
+function ensureRanking(player) {
+    if (!player) return null;
+    const id = safePlayerId(player.id);
+    if (!id) return null;
+
+    if (!rankings[id]) {
+        rankings[id] = normalizeRanking({ id, name: player.name });
+    } else {
+        rankings[id] = normalizeRanking(rankings[id], id);
+        rankings[id].name = safePlayerName(player.name || rankings[id].name);
+    }
+    return rankings[id];
+}
+
+function mergePlayerBackup(player) {
+    const record = ensureRanking(player);
+    if (!record) return null;
+
+    const incomingWins = safeInteger(player.wins);
+    const incomingLosses = safeInteger(player.losses);
+    const incomingGames = incomingWins + incomingLosses;
+    const currentGames = record.wins + record.losses;
+
+    // A device copy can restore a player's record after an ephemeral server restart.
+    // Existing server totals are never replaced by an older or equal client copy.
+    if (incomingGames > currentGames) {
+        record.wins = incomingWins;
+        record.losses = incomingLosses;
+        const suppliedRating = Number(player.rating);
+        record.rating = Number.isFinite(suppliedRating)
+            ? Math.max(100, Math.round(suppliedRating))
+            : defaultRating(incomingWins, incomingLosses);
+    }
+
+    record.name = safePlayerName(player.name || record.name);
+    record.rate = calculateRate(record.wins, record.losses);
+    record.updatedAt = Date.now();
+    return record;
+}
+
+function recordRankedMatch(roomState) {
+    if (roomState.statsRecorded || !roomState.startedAt || !roomState.guest) return;
+
+    const winnerRole = roomState.winner;
+    const loserRole = winnerRole === 'host' ? 'guest' : 'host';
+    if (!['host', 'guest'].includes(winnerRole)) return;
+
+    const winner = ensureRanking(roomState[winnerRole]);
+    const loser = ensureRanking(roomState[loserRole]);
+    if (!winner || !loser) return;
+
+    const winnerExpected = 1 / (1 + Math.pow(10, (loser.rating - winner.rating) / 400));
+    const ratingChange = Math.max(8, Math.round(32 * (1 - winnerExpected)));
+
+    winner.wins += 1;
+    loser.losses += 1;
+    winner.rating += ratingChange;
+    loser.rating = Math.max(100, loser.rating - ratingChange);
+    winner.rate = calculateRate(winner.wins, winner.losses);
+    loser.rate = calculateRate(loser.wins, loser.losses);
+    winner.updatedAt = Date.now();
+    loser.updatedAt = Date.now();
+
+    roomState.statsRecorded = true;
+    roomState.ratingChanges = {
+        [winnerRole]: ratingChange,
+        [loserRole]: -ratingChange
+    };
+    persistRankings();
+}
+
+function finishRoom(roomState, winner, reason) {
+    if (!roomState || roomState.status === 'finished') return;
+    roomState.status = 'finished';
+    roomState.winner = winner;
+    roomState.reason = reason;
+    roomState.finishedAt = Date.now();
+    recordRankedMatch(roomState);
+}
+
+function publicPlayer(player) {
+    if (!player) return null;
+    return {
+        id: player.id,
+        name: player.name,
+        status: player.status
+    };
+}
+
 function buildPublicRoomState(roomState, role) {
     const filteredSecrets = {
-        host: (roomState.status !== 'finished' && role === 'guest' && roomState.secrets.host.length > 0) ? [] : roomState.secrets.host,
-        guest: (roomState.status !== 'finished' && role === 'host' && roomState.secrets.guest.length > 0) ? [] : roomState.secrets.guest
+        host: roomState.status === 'finished' || role === 'host' ? roomState.secrets.host : [],
+        guest: roomState.status === 'finished' || role === 'guest' ? roomState.secrets.guest : []
     };
+    const player = roomState[role];
 
     return {
         code: roomState.code,
         status: roomState.status,
-        host: roomState.host,
-        guest: roomState.guest,
+        host: publicPlayer(roomState.host),
+        guest: publicPlayer(roomState.guest),
         currentTurn: roomState.currentTurn,
         guesses: roomState.guesses,
         winner: roomState.winner,
         reason: roomState.reason,
         turnStartedAt: roomState.turnStartedAt,
+        turnDurationMs: TURN_TIMEOUT_MS,
+        disconnectGraceMs: HEARTBEAT_STALE_MS + DISCONNECT_GRACE_MS,
+        statsRecorded: roomState.statsRecorded,
+        ratingChange: roomState.ratingChanges ? roomState.ratingChanges[role] || 0 : 0,
+        playerStats: player && rankings[player.id] ? publicRanking(rankings[player.id]) : null,
         secrets: filteredSecrets
     };
 }
 
-// Load rankings from file on startup
-if (fs.existsSync(RANKINGS_FILE)) {
+function touchPlayer(roomState, role, now = Date.now()) {
+    if (!roomState || !['host', 'guest'].includes(role) || !roomState[role]) return false;
+
+    if (roomState.guest) {
+        const hostWasStale = now - roomState.host.lastActive > HEARTBEAT_STALE_MS;
+        const guestWasStale = now - roomState.guest.lastActive > HEARTBEAT_STALE_MS;
+        if (hostWasStale && guestWasStale) {
+            // Resume fairly after a server sleep or a shared network outage.
+            roomState.host.lastActive = now;
+            roomState.guest.lastActive = now;
+            roomState.host.disconnectSince = null;
+            roomState.guest.disconnectSince = null;
+            if (roomState.status === 'playing') roomState.turnStartedAt = now;
+        }
+    }
+
+    roomState[role].lastActive = now;
+    roomState[role].disconnectSince = null;
+    return true;
+}
+
+function monitorConnections(roomState, now) {
+    if (!roomState.guest || !['setup', 'playing'].includes(roomState.status)) return;
+
+    const hostStale = now - roomState.host.lastActive > HEARTBEAT_STALE_MS;
+    const guestStale = now - roomState.guest.lastActive > HEARTBEAT_STALE_MS;
+
+    if (hostStale && guestStale) {
+        roomState.host.disconnectSince = null;
+        roomState.guest.disconnectSince = null;
+        return;
+    }
+
+    const checks = [
+        { role: 'host', stale: hostStale, opponentStale: guestStale, winner: 'guest' },
+        { role: 'guest', stale: guestStale, opponentStale: hostStale, winner: 'host' }
+    ];
+
+    checks.forEach(check => {
+        const player = roomState[check.role];
+        if (!player || roomState.status === 'finished') return;
+
+        if (check.stale && !check.opponentStale) {
+            if (!player.disconnectSince) player.disconnectSince = now;
+            if (now - player.disconnectSince >= DISCONNECT_GRACE_MS) {
+                finishRoom(roomState, check.winner, 'disconnect');
+                console.log(`[WATCHDOG] Room ${roomState.code} - ${check.role} failed to reconnect.`);
+            }
+        } else {
+            player.disconnectSince = null;
+        }
+    });
+}
+
+function loadRankings() {
+    if (!fs.existsSync(RANKINGS_FILE)) return;
     try {
-        rankings = JSON.parse(fs.readFileSync(RANKINGS_FILE, 'utf8'));
-    } catch (e) {
-        console.warn("Failed to load rankings.json:", e);
+        const stored = JSON.parse(fs.readFileSync(RANKINGS_FILE, 'utf8'));
+        rankings = Object.fromEntries(
+            Object.entries(stored || {})
+                .map(([id, record]) => [safePlayerId(id), normalizeRanking(record, id)])
+                .filter(([id]) => id)
+        );
+    } catch (error) {
+        console.warn('Failed to load rankings:', error);
     }
 }
 
-// --------------------------------------------------------------------------
-// BACKGROUND DISCONNECTION & TIMEOUT WATCHDOG LOOP (Runs every 2 seconds)
-// --------------------------------------------------------------------------
-setInterval(() => {
+loadRankings();
+
+const watchdogInterval = setInterval(() => {
     const now = Date.now();
     Object.keys(rooms).forEach(roomCode => {
         const room = rooms[roomCode];
-        if (room.status !== 'finished') {
-            // Check Host Disconnection (inactive for > 6 seconds)
-            if (room.guest && (now - room.host.lastActive) > 6000) {
-                room.status = 'finished';
-                room.winner = 'guest';
-                room.reason = 'disconnect';
-                console.log(`[WATCHDOG] Room ${roomCode} - Host disconnected. Forfeit victory to Guest.`);
+
+        if (room.status === 'finished') {
+            if (room.finishedAt && now - room.finishedAt > FINISHED_ROOM_RETENTION_MS) {
+                delete rooms[roomCode];
             }
-            // Check Guest Disconnection (only if guest has entered room)
-            else if (room.guest && (now - room.guest.lastActive) > 6000) {
-                room.status = 'finished';
-                room.winner = 'host';
-                room.reason = 'disconnect';
-                console.log(`[WATCHDOG] Room ${roomCode} - Guest disconnected. Forfeit victory to Host.`);
-            }
-            // Check Turn Timeout (60 seconds limit)
-            else if (room.status === 'playing' && (now - room.turnStartedAt) > 60000) {
-                room.status = 'finished';
-                room.winner = room.currentTurn === 'host' ? 'guest' : 'host';
-                room.reason = 'timeout';
-                console.log(`[WATCHDOG] Room ${roomCode} - Turn timed out. Forfeit victory to ${room.winner}.`);
-            }
+            return;
         }
+
+        const bothStale = room.guest
+            && now - room.host.lastActive > HEARTBEAT_STALE_MS
+            && now - room.guest.lastActive > HEARTBEAT_STALE_MS;
+
+        if (room.status === 'playing' && !bothStale && now - room.turnStartedAt >= TURN_TIMEOUT_MS) {
+            const winner = room.currentTurn === 'host' ? 'guest' : 'host';
+            finishRoom(room, winner, 'timeout');
+            console.log(`[WATCHDOG] Room ${roomCode} - Turn timed out. Winner: ${winner}.`);
+            return;
+        }
+
+        monitorConnections(room, now);
     });
-}, 2000);
+}, 1000);
+watchdogInterval.unref();
 
-// --------------------------------------------------------------------------
-// REST API ROUTING
-// --------------------------------------------------------------------------
+app.get('/api/health', (req, res) => {
+    res.json({
+        ok: true,
+        service: 'homerunbaseball',
+        time: Date.now(),
+        activeRooms: Object.keys(rooms).length,
+        rankedPlayers: Object.keys(rankings).length
+    });
+});
 
-// 1. Create Room
 app.post('/api/create', (req, res) => {
-    const { hostId, hostName } = req.body;
+    const hostId = safePlayerId(req.body.hostId);
+    const hostName = safePlayerName(req.body.hostName);
+    if (!hostId) return res.status(400).json({ error: '플레이어 정보를 확인해 주세요.' });
+
     let roomCode;
     do {
         roomCode = String(Math.floor(1000 + Math.random() * 9000));
@@ -121,184 +366,190 @@ app.post('/api/create', (req, res) => {
     rooms[roomCode] = {
         code: roomCode,
         status: 'waiting',
-        host: { id: hostId, name: hostName, status: 'waiting', lastActive: now },
+        host: { id: hostId, name: hostName, status: 'waiting', lastActive: now, disconnectSince: null },
         guest: null,
         currentTurn: 'host',
         guesses: { host: [], guest: [] },
         secrets: { host: [], guest: [] },
         winner: '',
+        reason: '',
         turnStartedAt: now,
-        reason: ''
+        startedAt: null,
+        finishedAt: null,
+        statsRecorded: false,
+        ratingChanges: null
     };
 
-    console.log(`[API] Room Created: ${roomCode} by ${hostName}`);
-    res.json(rooms[roomCode]);
+    ensureRanking(rooms[roomCode].host);
+    persistRankings();
+    console.log(`[API] Room created: ${roomCode} by ${hostName}`);
+    res.json(buildPublicRoomState(rooms[roomCode], 'host'));
 });
 
-// 2. Join Room
 app.post('/api/join', (req, res) => {
-    const { room, guestId, guestName } = req.body;
-    const roomState = rooms[room];
-
-    if (!roomState) {
-        return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
-    }
+    const roomState = rooms[String(req.body.room || '')];
+    if (!roomState) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
     if (roomState.status !== 'waiting') {
         return res.status(400).json({ error: '이미 게임이 진행 중이거나 가득 찬 방입니다.' });
     }
 
-    const now = Date.now();
-    roomState.guest = { id: guestId, name: guestName, status: 'waiting', lastActive: now };
-    roomState.status = 'setup';
+    const guestId = safePlayerId(req.body.guestId);
+    const guestName = safePlayerName(req.body.guestName);
+    if (!guestId) return res.status(400).json({ error: '플레이어 정보를 확인해 주세요.' });
+    if (guestId === roomState.host.id) {
+        return res.status(400).json({ error: '같은 계정으로 만든 방에는 참가할 수 없습니다.' });
+    }
 
-    console.log(`[API] Player Joined: ${guestName} entered room ${room}`);
+    const now = Date.now();
+    roomState.guest = {
+        id: guestId,
+        name: guestName,
+        status: 'waiting',
+        lastActive: now,
+        disconnectSince: null
+    };
+    roomState.status = 'setup';
+    touchPlayer(roomState, 'host', now);
+    touchPlayer(roomState, 'guest', now);
+    ensureRanking(roomState.guest);
+    persistRankings();
+
+    console.log(`[API] Player joined: ${guestName} entered room ${roomState.code}`);
     res.json(buildPublicRoomState(roomState, 'guest'));
 });
 
-// 3. Set Ready / Secret submit
 app.post('/api/ready', (req, res) => {
-    const { room, role, secret } = req.body;
-    const roomState = rooms[room];
-
-    if (!roomState) {
-        return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
-    }
-
+    const roomState = rooms[String(req.body.room || '')];
+    const role = req.body.role;
+    if (!roomState) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
     if (!['host', 'guest'].includes(role) || !roomState[role]) {
-        return res.status(400).json({ error: 'Invalid player role' });
+        return res.status(400).json({ error: '플레이어 역할을 확인할 수 없습니다.' });
     }
-    if (!isValidDigits(secret)) {
-        return res.status(400).json({ error: 'Secret must be 4 unique digits' });
+    if (!isValidDigits(req.body.secret)) {
+        return res.status(400).json({ error: '서로 다른 숫자 4개를 입력해 주세요.' });
     }
 
-    roomState.secrets[role] = normalizeDigits(secret);
+    touchPlayer(roomState, role);
+    roomState.secrets[role] = normalizeDigits(req.body.secret);
     roomState[role].status = 'ready';
 
-    // If both host and guest submitted secrets, start the match!
     if (roomState.host.status === 'ready' && roomState.guest && roomState.guest.status === 'ready') {
         roomState.status = 'playing';
-        roomState.turnStartedAt = Date.now();
-        console.log(`[API] Room ${room} - Match started playing!`);
+        roomState.startedAt = Date.now();
+        roomState.turnStartedAt = roomState.startedAt;
+        console.log(`[API] Room ${roomState.code} - Match started.`);
     }
 
     res.json(buildPublicRoomState(roomState, role));
 });
 
-// 4. Submit Turn Guess
 app.post('/api/guess', (req, res) => {
-    const { room, role, guess } = req.body;
-    const roomState = rooms[room];
-
-    if (!roomState) {
-        return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
-    }
-
-    if (roomState.status !== 'playing') {
-        return res.status(400).json({ error: 'Game is not in progress' });
-    }
+    const roomState = rooms[String(req.body.room || '')];
+    const role = req.body.role;
+    if (!roomState) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
+    if (roomState.status !== 'playing') return res.status(400).json({ error: '진행 중인 게임이 아닙니다.' });
     if (!['host', 'guest'].includes(role) || !roomState[role]) {
-        return res.status(400).json({ error: 'Invalid player role' });
+        return res.status(400).json({ error: '플레이어 역할을 확인할 수 없습니다.' });
     }
-    if (roomState.currentTurn !== role) {
-        return res.status(409).json({ error: 'Not your turn' });
-    }
-    if (!isValidDigits(guess)) {
-        return res.status(400).json({ error: 'Guess must be 4 unique digits' });
+    if (roomState.currentTurn !== role) return res.status(409).json({ error: '내 공격 차례가 아닙니다.' });
+    if (!isValidDigits(req.body.guess)) {
+        return res.status(400).json({ error: '서로 다른 숫자 4개를 입력해 주세요.' });
     }
 
+    touchPlayer(roomState, role);
     const opponentRole = role === 'host' ? 'guest' : 'host';
     const opponentSecret = roomState.secrets[opponentRole];
     if (!isValidDigits(opponentSecret)) {
-        return res.status(400).json({ error: 'Opponent secret is not ready' });
+        return res.status(400).json({ error: '상대방이 아직 준비되지 않았습니다.' });
     }
 
-    const { strikes, balls } = calculateScore(guess, opponentSecret);
-    const attempt = roomState.guesses[role].length + 1;
-    const guessObj = { guess: normalizeDigits(guess), strikes, balls, attempt };
+    const { strikes, balls } = calculateScore(req.body.guess, opponentSecret);
+    const guessObj = {
+        guess: normalizeDigits(req.body.guess),
+        strikes,
+        balls,
+        attempt: roomState.guesses[role].length + 1
+    };
     roomState.guesses[role].push(guessObj);
 
     if (strikes === DIGIT_COUNT) {
-        roomState.status = 'finished';
-        roomState.winner = role;
-        roomState.reason = 'win';
-        console.log(`[API] Room ${room} - Winner declared: ${role}`);
+        finishRoom(roomState, role, 'win');
+        console.log(`[API] Room ${roomState.code} - Winner: ${role}`);
     } else {
-        roomState.currentTurn = role === 'host' ? 'guest' : 'host';
+        roomState.currentTurn = opponentRole;
         roomState.turnStartedAt = Date.now();
     }
 
     res.json(buildPublicRoomState(roomState, role));
 });
 
-// 5. Poll Room State
 app.get('/api/poll', (req, res) => {
-    const { room, role } = req.query;
-    const roomState = rooms[room];
-
-    if (!roomState) {
-        return res.status(404).json({ error: 'Room not found' });
+    const roomState = rooms[String(req.query.room || '')];
+    const role = req.query.role;
+    if (!roomState) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
+    if (!['host', 'guest'].includes(role) || !roomState[role]) {
+        return res.status(400).json({ error: '플레이어 역할을 확인할 수 없습니다.' });
     }
 
-    const now = Date.now();
-    if (roomState.status !== 'finished') {
-        if (role === 'host') {
-            roomState.host.lastActive = now;
-        } else if (role === 'guest' && roomState.guest) {
-            roomState.guest.lastActive = now;
-        }
-    }
-
+    if (roomState.status !== 'finished') touchPlayer(roomState, role);
     res.json(buildPublicRoomState(roomState, role));
 });
 
-// 6. Get Public Rooms List
 app.get('/api/rooms', (req, res) => {
-    const activeRooms = [];
     const now = Date.now();
-
-    Object.keys(rooms).forEach(code => {
-        const room = rooms[code];
-        if (room.status === 'waiting' && (now - room.host.lastActive) < 8000) {
-            activeRooms.push({
-                code: room.code,
-                hostName: room.host.name
-            });
-        }
-    });
-
+    const activeRooms = Object.values(rooms)
+        .filter(room => room.status === 'waiting' && now - room.host.lastActive < WAITING_ROOM_VISIBLE_MS)
+        .map(room => ({ code: room.code, hostName: room.host.name }));
     res.json(activeRooms);
 });
 
-// 7. Get Rankings Leaderboard
 app.get('/api/rankings', (req, res) => {
-    const list = Object.values(rankings);
+    const list = sortRankings(Object.values(rankings).map(publicRanking));
     res.json(list);
 });
 
-// 8. Register/Sync Player Score
-app.post('/api/ranking', (req, res) => {
-    const p = req.body;
-    rankings[p.id] = {
-        id: p.id,
-        name: p.name,
-        wins: p.wins,
-        losses: p.losses,
-        rate: p.rate
-    };
-
-    // Save back to rankings.json asynchronously
-    fs.writeFile(RANKINGS_FILE, JSON.stringify(rankings, null, 4), (err) => {
-        if (err) console.error("Failed to save rankings.json:", err);
-    });
-
-    res.json({ success: true });
+app.get('/api/ranking/:id', (req, res) => {
+    const id = safePlayerId(req.params.id);
+    const record = rankings[id];
+    if (!record) return res.status(404).json({ error: '아직 대전 기록이 없습니다.' });
+    res.json(publicRanking(record));
 });
 
-// Serve main frontend entrypoint
+app.post('/api/ranking', (req, res) => {
+    const player = req.body || {};
+    if (!safePlayerId(player.id)) {
+        return res.status(400).json({ error: '플레이어 정보를 확인해 주세요.' });
+    }
+
+    const record = mergePlayerBackup(player);
+    persistRankings();
+    res.json({ success: true, player: publicRanking(record) });
+});
+
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-app.listen(PORT, () => {
-    console.log(`Production Game Server is running on port ${PORT}`);
-});
+let httpServer = null;
+if (require.main === module) {
+    httpServer = app.listen(PORT, () => {
+        console.log(`Production Game Server is running on port ${PORT}`);
+    });
+}
+
+module.exports = {
+    app,
+    httpServer,
+    _internals: {
+        calculateScore,
+        flushRankingWrites: () => rankingWriteQueue,
+        monitorConnections,
+        normalizeRanking,
+        sortRankings,
+        constants: {
+            TURN_TIMEOUT_MS,
+            HEARTBEAT_STALE_MS,
+            DISCONNECT_GRACE_MS
+        }
+    }
+};
