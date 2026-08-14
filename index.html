@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>홈런 숫자야구 - 1대1 대전 & 랭킹</title>
-    <meta name="description" content="실시간 1대1 대전과 토스 연동 랭킹을 지원하는 지능형 숫자 야구 게임!">
+    <meta name="description" content="실시간 1대1 대전과 랭킹을 지원하는 지능형 숫자 야구 게임!">
     <!-- Google Fonts: Outfit, Noto Sans KR -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -77,7 +77,7 @@
                 margin: 0;
                 letter-spacing: -0.5px;
             ">홈런 숫자야구</h1>
-            <p style="color: rgba(255,255,255,0.4); font-size: 0.8rem; margin: 8px 0 0 0; letter-spacing: 2px; font-weight: 600;">TOSS MINI APP</p>
+            <p style="color: rgba(255,255,255,0.4); font-size: 0.8rem; margin: 8px 0 0 0; letter-spacing: 2px; font-weight: 600;">NUMBER BASEBALL</p>
         </div>
         <!-- Progress bar -->
         <div style="width: 120px; height: 3px; background: rgba(255,255,255,0.06); border-radius: 1.5px; overflow: hidden;">
@@ -96,16 +96,16 @@
                     <div class="ball-glow">
                         <i class="fa-solid fa-baseball-bat-ball"></i>
                     </div>
-                    <span class="logo-subtitle">TOSS MINI APP PLATFORM</span>
+                    <span class="logo-subtitle">REALTIME NUMBER BASEBALL</span>
                     <h1 class="logo-title">홈런 숫자야구</h1>
                 </div>
             </header>
 
-            <section class="user-profile-bar" id="lobby-profile-bar" style="cursor: pointer;" title="닉네임 변경">
+            <section class="user-profile-bar" id="lobby-profile-bar" style="cursor: pointer;" title="계정 및 기록">
                 <div class="profile-avatar"><i class="fa-solid fa-circle-user"></i></div>
                 <div class="profile-info">
                     <span class="profile-name" id="lobby-profile-name">로딩 중... <i class="fa-solid fa-pen-to-square edit-icon" style="font-size: 0.8rem; margin-left: 5px; opacity: 0.6;"></i></span>
-                    <span class="profile-stats" id="lobby-profile-stats">전적: -승 -패 (승률 0.0%)</span>
+                    <span class="profile-stats" id="lobby-profile-stats">전적: 0승 0패 (승률 0%)</span>
                 </div>
             </section>
 
@@ -120,7 +120,7 @@
                     <i class="fa-solid fa-arrow-right-to-bracket"></i> 방 참가하기
                 </button>
                 <button id="btn-menu-rankings" class="menu-btn info-btn">
-                    <i class="fa-solid fa-ranking-star"></i> 토스 실시간 랭킹
+                    <i class="fa-solid fa-ranking-star"></i> 실시간 랭킹
                 </button>
                 <button id="btn-menu-rules" class="menu-btn guide-btn">
                     <i class="fa-solid fa-circle-question"></i> 게임 방법 보기
@@ -138,7 +138,7 @@
             </section>
 
             <footer class="lobby-footer">
-                <p><i class="fa-solid fa-shield-halved"></i> Toss Secure Login 연동 중</p>
+                <p><i class="fa-solid fa-shield-halved"></i> 안전한 닉네임으로 플레이 중</p>
             </footer>
         </main>
 
@@ -155,7 +155,8 @@
             <section class="rank-summary">
                 <div class="my-rank-card">
                     <span class="my-rank-label">나의 현재 랭킹</span>
-                    <span class="my-rank-value">15위 <span class="my-rank-rate">(상위 12%)</span></span>
+                    <span id="my-rank-position" class="my-rank-value">집계 중</span>
+                    <span id="my-rank-detail" class="my-rank-rate">대전 기록을 불러오고 있습니다.</span>
                 </div>
             </section>
 
@@ -200,7 +201,7 @@
                 <div class="player-card active-player">
                     <i class="fa-solid fa-circle-user avatar-me"></i>
                     <span class="player-role">나</span>
-                    <span class="player-name">김토스</span>
+                    <span id="waiting-my-name" class="player-name">게스트</span>
                     <span class="player-status ready">준비 완료</span>
                 </div>
                 <div class="vs-badge">VS</div>
@@ -259,7 +260,7 @@
             <!-- Battle Status Panel -->
             <section class="battle-players-bar">
                 <div class="battle-player me-turn" id="player-me-box">
-                    <span class="battle-name">나 (김토스)</span>
+                    <span id="game-my-name" class="battle-name">나 (게스트)</span>
                     <span class="battle-sub">공격 진행 중</span>
                 </div>
                 <div class="turn-bulb-container">
@@ -275,8 +276,8 @@
             <!-- Attempts left indicator -->
             <section class="game-info-mini">
                 <span>남은 공격 기회: <strong id="attempts-left" class="neon-blue">10</strong>회</span>
-                <span id="turn-timer-container" style="display: none; color: var(--neon-orange); font-weight: bold; margin-left: auto; font-family: var(--font-numeric);">
-                    <i class="fa-solid fa-clock"></i> 턴오버 <span id="turn-timer-value">60</span>s
+                <span id="turn-timer-container" style="display: none;">
+                    <i class="fa-solid fa-clock"></i> 턴오버 <span id="turn-timer-value">60</span>초
                 </span>
                 <button id="btn-simulate-opp" class="simulator-badge hidden"><i class="fa-solid fa-robot"></i> 상대 공격</button>
             </section>
@@ -456,17 +457,74 @@
                 <button id="btn-submit-join" class="restart-btn" style="font-size:0.95rem; padding:10px 0;">입장하기</button>
             </div>
         </div>
+    </div>
+
+    <!-- 4. Account and record management -->
+    <div id="account-modal" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true">
+        <div class="modal-content account-dialog scale-up">
+            <div class="account-dialog-header">
+                <div>
+                    <span class="account-dialog-kicker">PLAYER PROFILE</span>
+                    <h2>계정 및 기록</h2>
+                </div>
+                <button id="btn-close-account" class="account-close-btn" aria-label="닫기" title="닫기">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+            <div class="account-status-row">
+                <i class="fa-solid fa-user-shield"></i>
+                <div>
+                    <strong>익명 계정</strong>
+                    <span>이 기기에서 자동 로그인 중</span>
+                </div>
+            </div>
+            <label class="account-field-label" for="account-nickname-input">닉네임</label>
+            <div class="account-name-row">
+                <input id="account-nickname-input" type="text" maxlength="8" autocomplete="off">
+                <button id="btn-save-account-name" class="account-save-btn">저장</button>
+            </div>
+            <div class="account-record-card">
+                <span>현재 시즌 전적</span>
+                <strong id="account-record-value">0승 0패 · 1000점</strong>
+            </div>
+            <div class="account-danger-actions">
+                <button id="btn-reset-record" class="account-action-btn warning">
+                    <i class="fa-solid fa-rotate-left"></i> 전적 초기화
+                </button>
+                <button id="btn-delete-account" class="account-action-btn danger">
+                    <i class="fa-solid fa-user-xmark"></i> 계정·기록 삭제
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 5. App-styled confirmation dialog -->
+    <div id="message-modal" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true">
+        <div class="message-dialog scale-up">
+            <div class="message-dialog-icon"><i id="message-modal-icon" class="fa-solid fa-circle-question"></i></div>
+            <h2 id="message-modal-title">확인</h2>
+            <p id="message-modal-text">계속 진행하시겠습니까?</p>
+            <div class="message-dialog-actions">
+                <button id="message-modal-cancel" class="message-dialog-btn secondary">취소</button>
+                <button id="message-modal-confirm" class="message-dialog-btn primary">확인</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="app-toast-stack" class="app-toast-stack" aria-live="polite" aria-atomic="true"></div>
     </div> <!-- end app-wrapper -->
  
     <!-- Firebase Compat CDN -->
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
     
-    <!-- Toss bridge simulator & config -->
-    <script src="toss-bridge.js"></script>
+    <!-- Platform bridge & config -->
+    <script src="api-config.js"></script>
+    <script src="auth-client.js"></script>
+    <script src="game-bridge.js"></script>
     <script src="firebase-config.js"></script>
 
     <!-- Main Game Logic -->
-    <script src="app.js?v=20260709-playball-only"></script>
+    <script src="app.js?v=20260814-v6-auth-db"></script>
 </body>
 </html>

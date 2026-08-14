@@ -1,17 +1,16 @@
+const crypto = require('node:crypto');
+const path = require('node:path');
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
+const { createAuth } = require('./auth');
+const { createDataStore, safePlayerName } = require('./database');
 
 const app = express();
 const PORT = process.env.PORT || 8000;
 
-app.use(cors());
+app.use(cors({ allowedHeaders: ['Content-Type', 'Authorization', 'X-Test-User-Id', 'X-Admin-Token'] }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
-
-let rooms = {};
-let rankings = {};
 
 const DIGIT_COUNT = 4;
 const TURN_TIMEOUT_MS = 60_000;
@@ -19,9 +18,39 @@ const HEARTBEAT_STALE_MS = 5_000;
 const DISCONNECT_GRACE_MS = 25_000;
 const WAITING_ROOM_VISIBLE_MS = 30_000;
 const FINISHED_ROOM_RETENTION_MS = 10 * 60_000;
-const RANKINGS_FILE = process.env.RANKINGS_FILE || path.join(__dirname, 'rankings.json');
 
-let rankingWriteQueue = Promise.resolve();
+const rooms = {};
+const auth = createAuth();
+let dataStore = null;
+let dataStoreError = null;
+
+try {
+    dataStore = createDataStore();
+} catch (error) {
+    dataStoreError = error;
+}
+
+const dataStoreReady = dataStore
+    ? dataStore.init().catch(error => {
+        dataStoreError = error;
+        console.error('Database initialization failed:', error.message);
+    })
+    : Promise.resolve();
+
+function asyncRoute(handler) {
+    return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+}
+
+async function requireDataStore(req, res, next) {
+    await dataStoreReady;
+    if (!dataStore || dataStoreError) {
+        return res.status(503).json({
+            error: '전적 데이터베이스가 준비되지 않았습니다.',
+            detail: dataStoreError ? dataStoreError.message : 'DATABASE_URL missing'
+        });
+    }
+    return next();
+}
 
 function normalizeDigits(value) {
     if (!Array.isArray(value)) return [];
@@ -42,238 +71,117 @@ function calculateScore(guess, secret) {
     let balls = 0;
 
     guessDigits.forEach((digit, index) => {
-        if (digit === secretDigits[index]) {
-            strikes++;
-        } else if (secretDigits.includes(digit)) {
-            balls++;
-        }
+        if (digit === secretDigits[index]) strikes += 1;
+        else if (secretDigits.includes(digit)) balls += 1;
     });
-
     return { strikes, balls };
 }
 
-function safeInteger(value) {
-    const number = Number(value);
-    return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : 0;
-}
-
-function safePlayerId(value) {
-    return typeof value === 'string' ? value.trim().slice(0, 80) : '';
-}
-
-function safePlayerName(value) {
-    const name = typeof value === 'string' ? value.trim().slice(0, 12) : '';
-    return name || '야구유저';
-}
-
-function calculateRate(wins, losses) {
-    const total = wins + losses;
-    return total > 0 ? Number(((wins / total) * 100).toFixed(1)) : 0;
-}
-
-function defaultRating(wins, losses) {
-    return Math.max(100, 1000 + ((wins - losses) * 16));
-}
-
-function normalizeRanking(record, fallbackId = '') {
-    const wins = safeInteger(record && record.wins);
-    const losses = safeInteger(record && record.losses);
-    const suppliedRating = Number(record && record.rating);
-
-    return {
-        id: safePlayerId((record && record.id) || fallbackId),
-        name: safePlayerName(record && record.name),
-        wins,
-        losses,
-        rate: calculateRate(wins, losses),
-        rating: Number.isFinite(suppliedRating)
-            ? Math.max(100, Math.round(suppliedRating))
-            : defaultRating(wins, losses),
-        updatedAt: Number(record && record.updatedAt) || Date.now()
-    };
-}
-
-function publicRanking(record) {
-    const normalized = normalizeRanking(record);
-    return {
-        id: normalized.id,
-        name: normalized.name,
-        wins: normalized.wins,
-        losses: normalized.losses,
-        games: normalized.wins + normalized.losses,
-        rate: normalized.rate,
-        rating: normalized.rating
-    };
-}
-
-function sortRankings(list) {
-    return list.sort((a, b) => (
-        b.rating - a.rating
-        || b.wins - a.wins
-        || a.losses - b.losses
-        || a.name.localeCompare(b.name, 'ko')
-    ));
-}
-
-function persistRankings() {
-    const snapshot = JSON.stringify(rankings, null, 2);
-    rankingWriteQueue = rankingWriteQueue
-        .catch(() => {})
-        .then(async () => {
-            await fs.promises.mkdir(path.dirname(RANKINGS_FILE), { recursive: true });
-            await fs.promises.writeFile(RANKINGS_FILE, snapshot, 'utf8');
-        })
-        .catch(error => {
-            console.error('Failed to save rankings:', error);
-        });
-    return rankingWriteQueue;
-}
-
-function ensureRanking(player) {
+function publicRoomPlayer(player) {
     if (!player) return null;
-    const id = safePlayerId(player.id);
-    if (!id) return null;
-
-    if (!rankings[id]) {
-        rankings[id] = normalizeRanking({ id, name: player.name });
-    } else {
-        rankings[id] = normalizeRanking(rankings[id], id);
-        rankings[id].name = safePlayerName(player.name || rankings[id].name);
-    }
-    return rankings[id];
+    return { name: player.name, status: player.status };
 }
 
-function mergePlayerBackup(player) {
-    const record = ensureRanking(player);
-    if (!record) return null;
-
-    const incomingWins = safeInteger(player.wins);
-    const incomingLosses = safeInteger(player.losses);
-    const incomingGames = incomingWins + incomingLosses;
-    const currentGames = record.wins + record.losses;
-
-    // A device copy can restore a player's record after an ephemeral server restart.
-    // Existing server totals are never replaced by an older or equal client copy.
-    if (incomingGames > currentGames) {
-        record.wins = incomingWins;
-        record.losses = incomingLosses;
-        const suppliedRating = Number(player.rating);
-        record.rating = Number.isFinite(suppliedRating)
-            ? Math.max(100, Math.round(suppliedRating))
-            : defaultRating(incomingWins, incomingLosses);
-    }
-
-    record.name = safePlayerName(player.name || record.name);
-    record.rate = calculateRate(record.wins, record.losses);
-    record.updatedAt = Date.now();
-    return record;
-}
-
-function recordRankedMatch(roomState) {
-    if (roomState.statsRecorded || !roomState.startedAt || !roomState.guest) return;
-
-    const winnerRole = roomState.winner;
-    const loserRole = winnerRole === 'host' ? 'guest' : 'host';
-    if (!['host', 'guest'].includes(winnerRole)) return;
-
-    const winner = ensureRanking(roomState[winnerRole]);
-    const loser = ensureRanking(roomState[loserRole]);
-    if (!winner || !loser) return;
-
-    const winnerExpected = 1 / (1 + Math.pow(10, (loser.rating - winner.rating) / 400));
-    const ratingChange = Math.max(8, Math.round(32 * (1 - winnerExpected)));
-
-    winner.wins += 1;
-    loser.losses += 1;
-    winner.rating += ratingChange;
-    loser.rating = Math.max(100, loser.rating - ratingChange);
-    winner.rate = calculateRate(winner.wins, winner.losses);
-    loser.rate = calculateRate(loser.wins, loser.losses);
-    winner.updatedAt = Date.now();
-    loser.updatedAt = Date.now();
-
-    roomState.statsRecorded = true;
-    roomState.ratingChanges = {
-        [winnerRole]: ratingChange,
-        [loserRole]: -ratingChange
-    };
-    persistRankings();
-}
-
-function finishRoom(roomState, winner, reason) {
-    if (!roomState || roomState.status === 'finished') return;
-    roomState.status = 'finished';
-    roomState.winner = winner;
-    roomState.reason = reason;
-    roomState.finishedAt = Date.now();
-    recordRankedMatch(roomState);
-}
-
-function publicPlayer(player) {
-    if (!player) return null;
-    return {
-        id: player.id,
-        name: player.name,
-        status: player.status
-    };
-}
-
-function buildPublicRoomState(roomState, role) {
+function buildPublicRoomState(room, role) {
     const filteredSecrets = {
-        host: roomState.status === 'finished' || role === 'host' ? roomState.secrets.host : [],
-        guest: roomState.status === 'finished' || role === 'guest' ? roomState.secrets.guest : []
+        host: room.status === 'finished' || role === 'host' ? room.secrets.host : [],
+        guest: room.status === 'finished' || role === 'guest' ? room.secrets.guest : []
     };
-    const player = roomState[role];
+    const player = room[role];
 
     return {
-        code: roomState.code,
-        status: roomState.status,
-        host: publicPlayer(roomState.host),
-        guest: publicPlayer(roomState.guest),
-        currentTurn: roomState.currentTurn,
-        guesses: roomState.guesses,
-        winner: roomState.winner,
-        reason: roomState.reason,
-        turnStartedAt: roomState.turnStartedAt,
+        code: room.code,
+        status: room.status,
+        host: publicRoomPlayer(room.host),
+        guest: publicRoomPlayer(room.guest),
+        currentTurn: room.currentTurn,
+        guesses: room.guesses,
+        winner: room.winner,
+        reason: room.reason,
+        turnStartedAt: room.turnStartedAt,
         turnDurationMs: TURN_TIMEOUT_MS,
         disconnectGraceMs: HEARTBEAT_STALE_MS + DISCONNECT_GRACE_MS,
-        statsRecorded: roomState.statsRecorded,
-        ratingChange: roomState.ratingChanges ? roomState.ratingChanges[role] || 0 : 0,
-        playerStats: player && rankings[player.id] ? publicRanking(rankings[player.id]) : null,
+        statsRecorded: room.statsRecorded,
+        ratingChange: room.ratingChanges ? room.ratingChanges[role] || 0 : 0,
+        playerStats: player ? player.stats || null : null,
         secrets: filteredSecrets
     };
 }
 
-function touchPlayer(roomState, role, now = Date.now()) {
-    if (!roomState || !['host', 'guest'].includes(role) || !roomState[role]) return false;
+function userOwnsRole(room, role, userId) {
+    return ['host', 'guest'].includes(role) && room[role] && room[role].id === userId;
+}
 
-    if (roomState.guest) {
-        const hostWasStale = now - roomState.host.lastActive > HEARTBEAT_STALE_MS;
-        const guestWasStale = now - roomState.guest.lastActive > HEARTBEAT_STALE_MS;
+function touchPlayer(room, role, now = Date.now()) {
+    if (!room || !['host', 'guest'].includes(role) || !room[role]) return false;
+
+    if (room.guest) {
+        const hostWasStale = now - room.host.lastActive > HEARTBEAT_STALE_MS;
+        const guestWasStale = now - room.guest.lastActive > HEARTBEAT_STALE_MS;
         if (hostWasStale && guestWasStale) {
-            // Resume fairly after a server sleep or a shared network outage.
-            roomState.host.lastActive = now;
-            roomState.guest.lastActive = now;
-            roomState.host.disconnectSince = null;
-            roomState.guest.disconnectSince = null;
-            if (roomState.status === 'playing') roomState.turnStartedAt = now;
+            room.host.lastActive = now;
+            room.guest.lastActive = now;
+            room.host.disconnectSince = null;
+            room.guest.disconnectSince = null;
+            if (room.status === 'playing') room.turnStartedAt = now;
         }
     }
 
-    roomState[role].lastActive = now;
-    roomState[role].disconnectSince = null;
+    room[role].lastActive = now;
+    room[role].disconnectSince = null;
     return true;
 }
 
-function monitorConnections(roomState, now) {
-    if (!roomState.guest || !['setup', 'playing'].includes(roomState.status)) return;
+async function recordRankedMatch(room) {
+    if (room.statsRecorded || !room.startedAt || !room.guest) return;
+    const winnerRole = room.winner;
+    const loserRole = winnerRole === 'host' ? 'guest' : 'host';
+    if (!['host', 'guest'].includes(winnerRole)) return;
 
-    const hostStale = now - roomState.host.lastActive > HEARTBEAT_STALE_MS;
-    const guestStale = now - roomState.guest.lastActive > HEARTBEAT_STALE_MS;
+    const result = await dataStore.recordMatch({
+        matchId: room.matchId,
+        roomCode: room.code,
+        winnerId: room[winnerRole].id,
+        winnerName: room[winnerRole].name,
+        loserId: room[loserRole].id,
+        loserName: room[loserRole].name,
+        reason: room.reason
+    });
 
+    room[winnerRole].stats = result.winner;
+    room[loserRole].stats = result.loser;
+    room.statsRecorded = true;
+    room.ratingChanges = {
+        [winnerRole]: result.ratingChange,
+        [loserRole]: -result.ratingChange
+    };
+}
+
+async function finishRoom(room, winner, reason) {
+    if (!room) return;
+    if (room.status !== 'finished') {
+        room.status = 'finished';
+        room.winner = winner;
+        room.reason = reason;
+        room.finishedAt = Date.now();
+    }
+    if (!room.statsPromise) {
+        room.statsPromise = recordRankedMatch(room).catch(error => {
+            room.statsError = error.message;
+            console.error(`[RANKING] Room ${room.code} failed:`, error.message);
+        });
+    }
+    await room.statsPromise;
+}
+
+async function monitorConnections(room, now) {
+    if (!room.guest || !['setup', 'playing'].includes(room.status)) return;
+
+    const hostStale = now - room.host.lastActive > HEARTBEAT_STALE_MS;
+    const guestStale = now - room.guest.lastActive > HEARTBEAT_STALE_MS;
     if (hostStale && guestStale) {
-        roomState.host.disconnectSince = null;
-        roomState.guest.disconnectSince = null;
+        room.host.disconnectSince = null;
+        room.guest.disconnectSince = null;
         return;
     }
 
@@ -281,92 +189,143 @@ function monitorConnections(roomState, now) {
         { role: 'host', stale: hostStale, opponentStale: guestStale, winner: 'guest' },
         { role: 'guest', stale: guestStale, opponentStale: hostStale, winner: 'host' }
     ];
-
-    checks.forEach(check => {
-        const player = roomState[check.role];
-        if (!player || roomState.status === 'finished') return;
-
+    for (const check of checks) {
+        const player = room[check.role];
+        if (!player || room.status === 'finished') continue;
         if (check.stale && !check.opponentStale) {
             if (!player.disconnectSince) player.disconnectSince = now;
             if (now - player.disconnectSince >= DISCONNECT_GRACE_MS) {
-                finishRoom(roomState, check.winner, 'disconnect');
-                console.log(`[WATCHDOG] Room ${roomState.code} - ${check.role} failed to reconnect.`);
+                await finishRoom(room, check.winner, 'disconnect');
+                console.log(`[WATCHDOG] Room ${room.code} - ${check.role} failed to reconnect.`);
             }
         } else {
             player.disconnectSince = null;
         }
-    });
-}
-
-function loadRankings() {
-    if (!fs.existsSync(RANKINGS_FILE)) return;
-    try {
-        const stored = JSON.parse(fs.readFileSync(RANKINGS_FILE, 'utf8'));
-        rankings = Object.fromEntries(
-            Object.entries(stored || {})
-                .map(([id, record]) => [safePlayerId(id), normalizeRanking(record, id)])
-                .filter(([id]) => id)
-        );
-    } catch (error) {
-        console.warn('Failed to load rankings:', error);
     }
 }
 
-loadRankings();
-
-const watchdogInterval = setInterval(() => {
-    const now = Date.now();
-    Object.keys(rooms).forEach(roomCode => {
-        const room = rooms[roomCode];
-
-        if (room.status === 'finished') {
-            if (room.finishedAt && now - room.finishedAt > FINISHED_ROOM_RETENTION_MS) {
-                delete rooms[roomCode];
+let watchdogBusy = false;
+const watchdogInterval = setInterval(async () => {
+    if (watchdogBusy) return;
+    watchdogBusy = true;
+    try {
+        const now = Date.now();
+        for (const roomCode of Object.keys(rooms)) {
+            const room = rooms[roomCode];
+            if (room.status === 'finished') {
+                if (room.finishedAt && now - room.finishedAt > FINISHED_ROOM_RETENTION_MS) delete rooms[roomCode];
+                continue;
             }
-            return;
+
+            const bothStale = room.guest
+                && now - room.host.lastActive > HEARTBEAT_STALE_MS
+                && now - room.guest.lastActive > HEARTBEAT_STALE_MS;
+            if (room.status === 'playing' && !bothStale && now - room.turnStartedAt >= TURN_TIMEOUT_MS) {
+                const winner = room.currentTurn === 'host' ? 'guest' : 'host';
+                await finishRoom(room, winner, 'timeout');
+                console.log(`[WATCHDOG] Room ${roomCode} - Turn timed out. Winner: ${winner}.`);
+                continue;
+            }
+            await monitorConnections(room, now);
         }
-
-        const bothStale = room.guest
-            && now - room.host.lastActive > HEARTBEAT_STALE_MS
-            && now - room.guest.lastActive > HEARTBEAT_STALE_MS;
-
-        if (room.status === 'playing' && !bothStale && now - room.turnStartedAt >= TURN_TIMEOUT_MS) {
-            const winner = room.currentTurn === 'host' ? 'guest' : 'host';
-            finishRoom(room, winner, 'timeout');
-            console.log(`[WATCHDOG] Room ${roomCode} - Turn timed out. Winner: ${winner}.`);
-            return;
-        }
-
-        monitorConnections(room, now);
-    });
+    } finally {
+        watchdogBusy = false;
+    }
 }, 1000);
 watchdogInterval.unref();
 
-app.get('/api/health', (req, res) => {
-    res.json({
+const protectedApi = [asyncRoute(requireDataStore), auth.requireUser];
+
+app.get('/api/health', asyncRoute(async (req, res) => {
+    await dataStoreReady;
+    if (!dataStore || dataStoreError) {
+        return res.status(503).json({
+            ok: false,
+            service: 'homerunbaseball-v6',
+            database: { connected: false, error: dataStoreError ? dataStoreError.message : 'DATABASE_URL missing' },
+            authConfigured: auth.configured(),
+            activeRooms: Object.keys(rooms).length
+        });
+    }
+    const database = await dataStore.health();
+    return res.json({
         ok: true,
-        service: 'homerunbaseball',
+        service: 'homerunbaseball-v6',
         time: Date.now(),
-        activeRooms: Object.keys(rooms).length,
-        rankedPlayers: Object.keys(rankings).length
+        database,
+        authConfigured: auth.configured(),
+        activeRooms: Object.keys(rooms).length
     });
-});
+}));
 
-app.post('/api/create', (req, res) => {
-    const hostId = safePlayerId(req.body.hostId);
-    const hostName = safePlayerName(req.body.hostName);
-    if (!hostId) return res.status(400).json({ error: '플레이어 정보를 확인해 주세요.' });
+app.post('/api/me/bootstrap', ...protectedApi, asyncRoute(async (req, res) => {
+    const player = await dataStore.ensurePlayer(req.user.id, req.body.name);
+    res.json({ player });
+}));
 
+app.get('/api/me', ...protectedApi, asyncRoute(async (req, res) => {
+    let player = await dataStore.getPlayer(req.user.id);
+    if (!player) player = await dataStore.ensurePlayer(req.user.id, '야구유저');
+    res.json({ player });
+}));
+
+app.patch('/api/me', ...protectedApi, asyncRoute(async (req, res) => {
+    const name = safePlayerName(req.body.name);
+    const player = await dataStore.updateName(req.user.id, name);
+    res.json({ player });
+}));
+
+app.delete('/api/me/record', ...protectedApi, asyncRoute(async (req, res) => {
+    if (req.body.confirmation !== 'RESET') {
+        return res.status(400).json({ error: '전적 초기화 확인 값이 필요합니다.' });
+    }
+    const player = await dataStore.resetPlayer(req.user.id);
+    return res.json({ success: true, player });
+}));
+
+app.delete('/api/me', ...protectedApi, asyncRoute(async (req, res) => {
+    if (req.body.confirmation !== 'DELETE') {
+        return res.status(400).json({ error: '계정 삭제 확인 값이 필요합니다.' });
+    }
+    await dataStore.deletePlayer(req.user.id);
+    await auth.deleteAuthUser(req.user.id);
+    return res.json({ success: true });
+}));
+
+app.get('/api/rankings', ...protectedApi, asyncRoute(async (req, res) => {
+    const rankings = await dataStore.listRankings();
+    res.json(rankings.map(player => ({
+        name: player.name,
+        wins: player.wins,
+        losses: player.losses,
+        games: player.games,
+        rate: player.rate,
+        rating: player.rating,
+        seasonId: player.seasonId,
+        seasonName: player.seasonName,
+        isMe: player.id === req.user.id
+    })));
+}));
+
+app.post('/api/create', ...protectedApi, asyncRoute(async (req, res) => {
+    const profile = await dataStore.ensurePlayer(req.user.id, req.body.hostName);
     let roomCode;
-    do {
-        roomCode = String(Math.floor(1000 + Math.random() * 9000));
-    } while (rooms[roomCode]);
+    do roomCode = String(Math.floor(1000 + Math.random() * 9000));
+    while (rooms[roomCode]);
 
     const now = Date.now();
     rooms[roomCode] = {
+        matchId: crypto.randomUUID(),
         code: roomCode,
         status: 'waiting',
-        host: { id: hostId, name: hostName, status: 'waiting', lastActive: now, disconnectSince: null },
+        host: {
+            id: req.user.id,
+            name: profile.name,
+            stats: profile,
+            status: 'waiting',
+            lastActive: now,
+            disconnectSince: null
+        },
         guest: null,
         currentTurn: 'host',
         guesses: { host: [], guest: [] },
@@ -377,163 +336,134 @@ app.post('/api/create', (req, res) => {
         startedAt: null,
         finishedAt: null,
         statsRecorded: false,
+        statsPromise: null,
         ratingChanges: null
     };
-
-    ensureRanking(rooms[roomCode].host);
-    persistRankings();
-    console.log(`[API] Room created: ${roomCode} by ${hostName}`);
+    console.log(`[API] Room created: ${roomCode} by ${profile.name}`);
     res.json(buildPublicRoomState(rooms[roomCode], 'host'));
-});
+}));
 
-app.post('/api/join', (req, res) => {
-    const roomState = rooms[String(req.body.room || '')];
-    if (!roomState) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
-    if (roomState.status !== 'waiting') {
-        return res.status(400).json({ error: '이미 게임이 진행 중이거나 가득 찬 방입니다.' });
-    }
+app.post('/api/join', ...protectedApi, asyncRoute(async (req, res) => {
+    const room = rooms[String(req.body.room || '')];
+    if (!room) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
+    if (room.status !== 'waiting') return res.status(400).json({ error: '이미 게임이 진행 중이거나 가득 찬 방입니다.' });
+    if (req.user.id === room.host.id) return res.status(400).json({ error: '같은 계정으로 만든 방에는 참가할 수 없습니다.' });
 
-    const guestId = safePlayerId(req.body.guestId);
-    const guestName = safePlayerName(req.body.guestName);
-    if (!guestId) return res.status(400).json({ error: '플레이어 정보를 확인해 주세요.' });
-    if (guestId === roomState.host.id) {
-        return res.status(400).json({ error: '같은 계정으로 만든 방에는 참가할 수 없습니다.' });
-    }
-
+    const profile = await dataStore.ensurePlayer(req.user.id, req.body.guestName);
     const now = Date.now();
-    roomState.guest = {
-        id: guestId,
-        name: guestName,
+    room.guest = {
+        id: req.user.id,
+        name: profile.name,
+        stats: profile,
         status: 'waiting',
         lastActive: now,
         disconnectSince: null
     };
-    roomState.status = 'setup';
-    touchPlayer(roomState, 'host', now);
-    touchPlayer(roomState, 'guest', now);
-    ensureRanking(roomState.guest);
-    persistRankings();
+    room.status = 'setup';
+    touchPlayer(room, 'host', now);
+    touchPlayer(room, 'guest', now);
+    console.log(`[API] Player joined: ${profile.name} entered room ${room.code}`);
+    res.json(buildPublicRoomState(room, 'guest'));
+}));
 
-    console.log(`[API] Player joined: ${guestName} entered room ${roomState.code}`);
-    res.json(buildPublicRoomState(roomState, 'guest'));
-});
-
-app.post('/api/ready', (req, res) => {
-    const roomState = rooms[String(req.body.room || '')];
+app.post('/api/ready', ...protectedApi, asyncRoute(async (req, res) => {
+    const room = rooms[String(req.body.room || '')];
     const role = req.body.role;
-    if (!roomState) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
-    if (!['host', 'guest'].includes(role) || !roomState[role]) {
-        return res.status(400).json({ error: '플레이어 역할을 확인할 수 없습니다.' });
+    if (!room) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
+    if (!userOwnsRole(room, role, req.user.id)) return res.status(403).json({ error: '이 플레이어를 조작할 권한이 없습니다.' });
+    if (!isValidDigits(req.body.secret)) return res.status(400).json({ error: '서로 다른 숫자 4개를 입력해 주세요.' });
+
+    touchPlayer(room, role);
+    room.secrets[role] = normalizeDigits(req.body.secret);
+    room[role].status = 'ready';
+    if (room.host.status === 'ready' && room.guest && room.guest.status === 'ready') {
+        room.status = 'playing';
+        room.startedAt = Date.now();
+        room.turnStartedAt = room.startedAt;
+        console.log(`[API] Room ${room.code} - Match started.`);
     }
-    if (!isValidDigits(req.body.secret)) {
-        return res.status(400).json({ error: '서로 다른 숫자 4개를 입력해 주세요.' });
-    }
+    res.json(buildPublicRoomState(room, role));
+}));
 
-    touchPlayer(roomState, role);
-    roomState.secrets[role] = normalizeDigits(req.body.secret);
-    roomState[role].status = 'ready';
-
-    if (roomState.host.status === 'ready' && roomState.guest && roomState.guest.status === 'ready') {
-        roomState.status = 'playing';
-        roomState.startedAt = Date.now();
-        roomState.turnStartedAt = roomState.startedAt;
-        console.log(`[API] Room ${roomState.code} - Match started.`);
-    }
-
-    res.json(buildPublicRoomState(roomState, role));
-});
-
-app.post('/api/guess', (req, res) => {
-    const roomState = rooms[String(req.body.room || '')];
+app.post('/api/guess', ...protectedApi, asyncRoute(async (req, res) => {
+    const room = rooms[String(req.body.room || '')];
     const role = req.body.role;
-    if (!roomState) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
-    if (roomState.status !== 'playing') return res.status(400).json({ error: '진행 중인 게임이 아닙니다.' });
-    if (!['host', 'guest'].includes(role) || !roomState[role]) {
-        return res.status(400).json({ error: '플레이어 역할을 확인할 수 없습니다.' });
-    }
-    if (roomState.currentTurn !== role) return res.status(409).json({ error: '내 공격 차례가 아닙니다.' });
-    if (!isValidDigits(req.body.guess)) {
-        return res.status(400).json({ error: '서로 다른 숫자 4개를 입력해 주세요.' });
-    }
+    if (!room) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
+    if (room.status !== 'playing') return res.status(400).json({ error: '진행 중인 게임이 아닙니다.' });
+    if (!userOwnsRole(room, role, req.user.id)) return res.status(403).json({ error: '이 플레이어를 조작할 권한이 없습니다.' });
+    if (room.currentTurn !== role) return res.status(409).json({ error: '내 공격 차례가 아닙니다.' });
+    if (!isValidDigits(req.body.guess)) return res.status(400).json({ error: '서로 다른 숫자 4개를 입력해 주세요.' });
 
-    touchPlayer(roomState, role);
+    touchPlayer(room, role);
     const opponentRole = role === 'host' ? 'guest' : 'host';
-    const opponentSecret = roomState.secrets[opponentRole];
-    if (!isValidDigits(opponentSecret)) {
-        return res.status(400).json({ error: '상대방이 아직 준비되지 않았습니다.' });
-    }
+    const opponentSecret = room.secrets[opponentRole];
+    if (!isValidDigits(opponentSecret)) return res.status(400).json({ error: '상대방이 아직 준비되지 않았습니다.' });
 
     const { strikes, balls } = calculateScore(req.body.guess, opponentSecret);
-    const guessObj = {
+    room.guesses[role].push({
         guess: normalizeDigits(req.body.guess),
         strikes,
         balls,
-        attempt: roomState.guesses[role].length + 1
-    };
-    roomState.guesses[role].push(guessObj);
-
+        attempt: room.guesses[role].length + 1
+    });
     if (strikes === DIGIT_COUNT) {
-        finishRoom(roomState, role, 'win');
-        console.log(`[API] Room ${roomState.code} - Winner: ${role}`);
+        await finishRoom(room, role, 'win');
+        console.log(`[API] Room ${room.code} - Winner: ${role}`);
     } else {
-        roomState.currentTurn = opponentRole;
-        roomState.turnStartedAt = Date.now();
+        room.currentTurn = opponentRole;
+        room.turnStartedAt = Date.now();
     }
+    res.json(buildPublicRoomState(room, role));
+}));
 
-    res.json(buildPublicRoomState(roomState, role));
-});
-
-app.get('/api/poll', (req, res) => {
-    const roomState = rooms[String(req.query.room || '')];
+app.get('/api/poll', ...protectedApi, asyncRoute(async (req, res) => {
+    const room = rooms[String(req.query.room || '')];
     const role = req.query.role;
-    if (!roomState) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
-    if (!['host', 'guest'].includes(role) || !roomState[role]) {
-        return res.status(400).json({ error: '플레이어 역할을 확인할 수 없습니다.' });
-    }
+    if (!room) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
+    if (!userOwnsRole(room, role, req.user.id)) return res.status(403).json({ error: '이 플레이어를 확인할 권한이 없습니다.' });
+    if (room.status !== 'finished') touchPlayer(room, role);
+    if (room.statsPromise) await room.statsPromise;
+    res.json(buildPublicRoomState(room, role));
+}));
 
-    if (roomState.status !== 'finished') touchPlayer(roomState, role);
-    res.json(buildPublicRoomState(roomState, role));
-});
-
-app.get('/api/rooms', (req, res) => {
+app.get('/api/rooms', ...protectedApi, asyncRoute(async (req, res) => {
     const now = Date.now();
-    const activeRooms = Object.values(rooms)
+    res.json(Object.values(rooms)
         .filter(room => room.status === 'waiting' && now - room.host.lastActive < WAITING_ROOM_VISIBLE_MS)
-        .map(room => ({ code: room.code, hostName: room.host.name }));
-    res.json(activeRooms);
-});
+        .map(room => ({ code: room.code, hostName: room.host.name })));
+}));
 
-app.get('/api/rankings', (req, res) => {
-    const list = sortRankings(Object.values(rankings).map(publicRanking));
-    res.json(list);
-});
-
-app.get('/api/ranking/:id', (req, res) => {
-    const id = safePlayerId(req.params.id);
-    const record = rankings[id];
-    if (!record) return res.status(404).json({ error: '아직 대전 기록이 없습니다.' });
-    res.json(publicRanking(record));
-});
-
-app.post('/api/ranking', (req, res) => {
-    const player = req.body || {};
-    if (!safePlayerId(player.id)) {
-        return res.status(400).json({ error: '플레이어 정보를 확인해 주세요.' });
+app.post('/api/admin/seasons', asyncRoute(requireDataStore), asyncRoute(async (req, res) => {
+    const expected = process.env.ADMIN_API_TOKEN || '';
+    if (!expected || req.headers['x-admin-token'] !== expected) {
+        return res.status(403).json({ error: '관리자 권한이 필요합니다.' });
     }
+    const season = await dataStore.startSeason(req.body.name);
+    return res.json({ success: true, season });
+}));
 
-    const record = mergePlayerBackup(player);
-    persistRankings();
-    res.json({ success: true, player: publicRanking(record) });
+app.all('/api/ranking', (req, res) => {
+    res.status(410).json({ error: 'v6에서는 앱에서 전적을 직접 수정할 수 없습니다.' });
+});
+
+app.all('/api/ranking/:id', (req, res) => {
+    res.status(410).json({ error: 'v6에서는 개인 전적을 공개 ID로 조회하지 않습니다.' });
 });
 
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
+app.use((error, req, res, next) => {
+    console.error(`[API] ${req.method} ${req.path}:`, error);
+    if (res.headersSent) return next(error);
+    return res.status(error.status || 500).json({ error: error.message || '서버 오류가 발생했습니다.' });
+});
+
 let httpServer = null;
 if (require.main === module) {
     httpServer = app.listen(PORT, () => {
-        console.log(`Production Game Server is running on port ${PORT}`);
+        console.log(`Home Run Baseball v6 server is running on port ${PORT}`);
     });
 }
 
@@ -542,14 +472,11 @@ module.exports = {
     httpServer,
     _internals: {
         calculateScore,
-        flushRankingWrites: () => rankingWriteQueue,
+        dataStore,
+        dataStoreReady,
+        finishRoom,
         monitorConnections,
-        normalizeRanking,
-        sortRankings,
-        constants: {
-            TURN_TIMEOUT_MS,
-            HEARTBEAT_STALE_MS,
-            DISCONNECT_GRACE_MS
-        }
+        rooms,
+        constants: { TURN_TIMEOUT_MS, HEARTBEAT_STALE_MS, DISCONNECT_GRACE_MS }
     }
 };

@@ -1,18 +1,31 @@
 /**
- * 홈런 숫자야구 - App-in-Toss & Local Wi-Fi REST API Integration
+ * 홈런 숫자야구 - Realtime REST API Integration
  */
 
 // Game Constants
 const DIGIT_COUNT = 4;
 const MAX_ATTEMPTS = 10;
 const STORAGE_KEY_BEST = 'number_baseball_best_4digit';
+const STORAGE_KEY_STATS = 'homerun_baseball_stats_v2';
+const TURN_TIMEOUT_MS = 60_000;
+const TIMER_WARNING_SECONDS = 20;
 
-// Resolve Server IP automatically (falls back to local server IP)
-const API_BASE = (window.isAutomatedTest) 
+// Resolve Server URL. Published apps need a public HTTPS backend for 1:1 mode.
+const CONFIGURED_API_BASE = (window.HOMERUN_API_BASE || '').replace(/\/$/, '');
+const IS_LOCAL_HTTP = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(window.location.origin || '');
+const API_BASE = (window.isAutomatedTest)
                  ? 'http://127.0.0.1:9999-blocked'
-                 : ((window.location.origin && window.location.origin.startsWith('http')) 
-                    ? window.location.origin 
-                    : 'http://192.168.123.108:8000');
+                 : (IS_LOCAL_HTTP
+                    ? window.location.origin
+                    : (CONFIGURED_API_BASE
+                    || ((window.location.origin && window.location.origin.startsWith('http'))
+                        ? window.location.origin
+                        : 'http://192.168.123.108:8000')));
+
+function apiFetch(route, options = {}) {
+    const url = /^https?:\/\//i.test(route) ? route : `${API_BASE}${route}`;
+    return window.AuthClient.authorizedFetch(url, options);
+}
 
 // Game State
 let gameMode = 'solo'; // 'solo' or 'multi'
@@ -25,8 +38,8 @@ let attemptsLeft = MAX_ATTEMPTS;
 let isMyTurn = true;
 let isGameOver = false;
 
-// Player Profile (Toss Bridge)
-let myPlayer = { name: "로딩 중...", id: "TOSS-GUEST", avatar: "fa-solid fa-circle-user", wins: 0, losses: 0, rate: 0 };
+// Player Profile
+let myPlayer = { name: "로딩 중...", id: "LOCAL-GUEST", avatar: "fa-solid fa-circle-user", wins: 0, losses: 0, rate: 0, rating: 1000 };
 let opponentPlayer = null;
 
 // Room Info
@@ -42,15 +55,12 @@ let lastSpokenMyAttempt = 0;
 let gameAudioContext = null;
 let activeSpeechUtterance = null;
 let lastNotifiedGuestId = '';
-
-// Mock Leaderboard for Offline Fallback
-const mockRankings = [
-    { name: '김토스', wins: 78, losses: 12, rate: 86.6, isMe: false },
-    { name: '홈런왕김자바', wins: 65, losses: 15, rate: 81.3, isMe: false },
-    { name: '금융천재야구초보', wins: 54, losses: 18, rate: 75.0, isMe: false },
-    { name: '도토리수집가', wins: 48, losses: 20, rate: 70.6, isMe: false },
-    { name: '삼진아웃클럽', wins: 40, losses: 22, rate: 64.5, isMe: false }
-];
+let pollInFlight = false;
+let pollFailureCount = 0;
+let networkWarningActive = false;
+let lastWarnedTurnStartedAt = 0;
+let locallyRecordedRoomCode = '';
+let messageDialogResolver = null;
 
 // DOM Screen Elements
 const screens = {
@@ -80,6 +90,15 @@ const btnSimulateOpp = document.getElementById('btn-simulate-opp');
 const rulesModal = document.getElementById('rules-modal');
 const resultModal = document.getElementById('result-modal');
 const joinModal = document.getElementById('join-modal');
+const accountModal = document.getElementById('account-modal');
+const accountNicknameInput = document.getElementById('account-nickname-input');
+const accountRecordValue = document.getElementById('account-record-value');
+const messageModal = document.getElementById('message-modal');
+const messageModalTitle = document.getElementById('message-modal-title');
+const messageModalText = document.getElementById('message-modal-text');
+const messageModalIcon = document.getElementById('message-modal-icon');
+const messageModalCancel = document.getElementById('message-modal-cancel');
+const messageModalConfirm = document.getElementById('message-modal-confirm');
 
 // Result Modal Elements
 const resultBadge = document.getElementById('result-badge');
@@ -140,6 +159,77 @@ function safeAddListener(idOrEl, event, callback) {
     }
 }
 
+async function readApiResponse(response) {
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        const error = new Error(body.error || '서버 요청을 처리하지 못했습니다.');
+        error.status = response.status;
+        throw error;
+    }
+    return body;
+}
+
+function showToast(message, type = 'info', duration = 3200) {
+    const stack = document.getElementById('app-toast-stack');
+    if (!stack || !message) return;
+
+    const iconByType = {
+        success: 'fa-circle-check',
+        warning: 'fa-triangle-exclamation',
+        error: 'fa-circle-exclamation',
+        info: 'fa-circle-info'
+    };
+    const toast = document.createElement('div');
+    toast.className = `app-toast ${type}`;
+    toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
+    toast.innerHTML = `
+        <i class="fa-solid ${iconByType[type] || iconByType.info}" aria-hidden="true"></i>
+        <span></span>
+    `;
+    toast.querySelector('span').textContent = message;
+    stack.appendChild(toast);
+
+    window.setTimeout(() => {
+        toast.classList.add('leaving');
+        window.setTimeout(() => toast.remove(), 220);
+    }, duration);
+}
+
+function closeMessageDialog(confirmed) {
+    if (messageModal) {
+        messageModal.classList.add('hidden');
+        messageModal.setAttribute('aria-hidden', 'true');
+    }
+    if (messageDialogResolver) {
+        const resolve = messageDialogResolver;
+        messageDialogResolver = null;
+        resolve(Boolean(confirmed));
+    }
+}
+
+function showConfirmDialog({ title, message, confirmText = '확인', icon = 'fa-circle-question' }) {
+    if (window.isAutomatedTest) return Promise.resolve(true);
+    if (!messageModal) return Promise.resolve(window.confirm(message));
+
+    if (messageDialogResolver) closeMessageDialog(false);
+    messageModalTitle.textContent = title;
+    messageModalText.textContent = message;
+    messageModalConfirm.textContent = confirmText;
+    messageModalIcon.className = `fa-solid ${icon}`;
+    messageModal.classList.remove('hidden');
+    messageModal.setAttribute('aria-hidden', 'false');
+
+    return new Promise(resolve => {
+        messageDialogResolver = resolve;
+    });
+}
+
+safeAddListener(messageModalCancel, 'click', () => closeMessageDialog(false));
+safeAddListener(messageModalConfirm, 'click', () => closeMessageDialog(true));
+safeAddListener(messageModal, 'click', event => {
+    if (event.target === messageModal) closeMessageDialog(false);
+});
+
 function toSafeNumber(value, fallback = 0) {
     const number = Number(value);
     return Number.isFinite(number) ? number : fallback;
@@ -150,13 +240,18 @@ function normalizePlayerStats(player) {
     const losses = Math.max(0, Math.floor(toSafeNumber(player && player.losses)));
     const total = wins + losses;
     const calculatedRate = total > 0 ? parseFloat(((wins / total) * 100).toFixed(1)) : 0;
-    const rate = Number.isFinite(Number(player && player.rate)) ? Number(player.rate) : calculatedRate;
+    const suppliedRating = Number(player && player.rating);
+    const rating = Number.isFinite(suppliedRating)
+        ? Math.max(100, Math.round(suppliedRating))
+        : Math.max(100, 1000 + ((wins - losses) * 16));
 
     return {
         ...player,
         wins,
         losses,
-        rate: total > 0 ? rate : 0
+        games: total,
+        rate: calculatedRate,
+        rating
     };
 }
 
@@ -166,8 +261,36 @@ function mergePlayerProfile(profile) {
         ...profile,
         wins: profile && profile.wins !== undefined ? profile.wins : myPlayer.wins,
         losses: profile && profile.losses !== undefined ? profile.losses : myPlayer.losses,
-        rate: profile && profile.rate !== undefined ? profile.rate : myPlayer.rate
+        rate: profile && profile.rate !== undefined ? profile.rate : myPlayer.rate,
+        rating: profile && profile.rating !== undefined ? profile.rating : myPlayer.rating
     });
+}
+
+function loadLocalStatsBackup() {
+    try {
+        const stored = JSON.parse(localStorage.getItem(STORAGE_KEY_STATS) || 'null');
+        if (!stored || stored.id !== myPlayer.id) return null;
+        return normalizePlayerStats(stored);
+    } catch (error) {
+        return null;
+    }
+}
+
+function persistLocalStats() {
+    try {
+        const stats = normalizePlayerStats(myPlayer);
+        localStorage.setItem(STORAGE_KEY_STATS, JSON.stringify({
+            id: stats.id,
+            name: stats.name,
+            wins: stats.wins,
+            losses: stats.losses,
+            rate: stats.rate,
+            rating: stats.rating,
+            updatedAt: Date.now()
+        }));
+    } catch (error) {
+        console.warn('Could not save local stats backup:', error);
+    }
 }
 
 function updateLobbyProfileName() {
@@ -177,403 +300,36 @@ function updateLobbyProfileName() {
     }
 }
 
+function updateMyNameDisplays() {
+    const displayName = myPlayer.name || '게스트';
+    const waitingNameEl = document.getElementById('waiting-my-name');
+    const gameNameEl = document.getElementById('game-my-name');
+
+    if (waitingNameEl) {
+        waitingNameEl.textContent = displayName;
+    }
+    if (gameNameEl) {
+        gameNameEl.textContent = `나 (${displayName})`;
+    }
+}
+
 function resetRealtimeRenderCache() {
     lastRoomDataJson = '';
     lastMyGuessesJson = '';
     lastOppGuessesJson = '';
     lastSpokenMyAttempt = 0;
     lastNotifiedGuestId = '';
-}
-
-function getResultVoiceText(strikes, balls) {
-    if (strikes === DIGIT_COUNT) return '홈런!';
-    if (strikes === 0 && balls === 0) return '아웃!';
-
-    const countWords = ['', '원', '투', '쓰리', '포'];
-    const parts = [];
-    if (strikes > 0) parts.push(`${countWords[strikes] || strikes} 스트라이크`);
-    if (balls > 0) parts.push(`${countWords[balls] || balls} 볼`);
-    return `${parts.join(' ')}!`;
-}
-
-function getAudioContext() {
-    try {
-        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-        if (!AudioContextClass) return null;
-        if (!gameAudioContext) gameAudioContext = new AudioContextClass();
-        if (gameAudioContext.state === 'suspended') {
-            gameAudioContext.resume().catch(() => {});
-        }
-        return gameAudioContext;
-    } catch (err) {
-        return null;
-    }
-}
-
-function playTone(freq, delay, duration, type = 'sine', volume = 0.08) {
-    const ctx = getAudioContext();
-    if (!ctx) return;
-
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    const start = ctx.currentTime + delay;
-    const end = start + duration;
-
-    osc.type = type;
-    osc.frequency.setValueAtTime(freq, start);
-    gain.gain.setValueAtTime(0.0001, start);
-    gain.gain.exponentialRampToValueAtTime(volume, start + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.0001, end);
-
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start(start);
-    osc.stop(end + 0.02);
-}
-
-function playResultJingle(strikes, balls) {
-    if (strikes === DIGIT_COUNT) {
-        playTone(523, 0, 0.08, 'triangle', 0.1);
-        playTone(659, 0.09, 0.08, 'triangle', 0.1);
-        playTone(784, 0.18, 0.16, 'triangle', 0.11);
-    } else if (strikes === 0 && balls === 0) {
-        playTone(180, 0, 0.16, 'sawtooth', 0.06);
-    } else {
-        const total = strikes + balls;
-        for (let i = 0; i < total; i++) {
-            playTone(strikes > i ? 620 : 420, i * 0.07, 0.05, 'square', 0.045);
-        }
-    }
-}
-
-function speakResult(strikes, balls) {
-    const text = getResultVoiceText(strikes, balls);
-    playResultJingle(strikes, balls);
-
-    try {
-        if (!('speechSynthesis' in window) || !window.SpeechSynthesisUtterance) return;
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = 'ko-KR';
-        utterance.rate = 1.08;
-        utterance.pitch = strikes === DIGIT_COUNT ? 1.18 : 1.02;
-        utterance.volume = 1;
-        setTimeout(() => window.speechSynthesis.speak(utterance), 90);
-    } catch (err) {
-        // Sound feedback is optional; never block gameplay.
-    }
-}
-
-/* ==========================================================================
-   INITIALIZATION (유저 로그인 및 초기 연결)
-   ========================================================================== */
-
-function playNoise(delay, duration, volume = 0.04) {
-    const ctx = getAudioContext();
-    if (!ctx) return;
-
-    const sampleRate = ctx.sampleRate;
-    const buffer = ctx.createBuffer(1, Math.max(1, Math.floor(sampleRate * duration)), sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < data.length; i++) {
-        data[i] = (Math.random() * 2 - 1) * 0.55;
-    }
-
-    const source = ctx.createBufferSource();
-    const filter = ctx.createBiquadFilter();
-    const gain = ctx.createGain();
-    const start = ctx.currentTime + delay;
-    const end = start + duration;
-
-    filter.type = 'bandpass';
-    filter.frequency.setValueAtTime(900, start);
-    filter.Q.setValueAtTime(0.7, start);
-    gain.gain.setValueAtTime(0.0001, start);
-    gain.gain.linearRampToValueAtTime(volume, start + 0.04);
-    gain.gain.exponentialRampToValueAtTime(0.0001, end);
-
-    source.buffer = buffer;
-    source.connect(filter);
-    filter.connect(gain);
-    gain.connect(ctx.destination);
-    source.start(start);
-    source.stop(end + 0.02);
-}
-
-function playStartMusic() {
-    playNoise(0, 0.45, 0.018);
-    playTone(392, 0.02, 0.12, 'triangle', 0.08);
-    playTone(523, 0.16, 0.12, 'triangle', 0.08);
-    playTone(659, 0.30, 0.16, 'triangle', 0.09);
-    playTone(784, 0.48, 0.22, 'triangle', 0.1);
-    playTone(1046, 0.50, 0.18, 'sine', 0.035);
-}
-
-function playUmpireCue(strikes, balls) {
-    if (strikes === DIGIT_COUNT) {
-        playTone(330, 0, 0.08, 'square', 0.07);
-        playTone(440, 0.10, 0.08, 'square', 0.07);
-        playTone(660, 0.20, 0.20, 'triangle', 0.1);
-        playNoise(0.05, 0.24, 0.02);
-        return;
-    }
-
-    if (strikes === 0 && balls === 0) {
-        playTone(190, 0, 0.10, 'sawtooth', 0.08);
-        playTone(135, 0.12, 0.16, 'sawtooth', 0.07);
-        return;
-    }
-
-    const total = strikes + balls;
-    for (let i = 0; i < total; i++) {
-        const isStrikeTone = i < strikes;
-        playTone(isStrikeTone ? 360 : 250, i * 0.09, 0.055, 'square', isStrikeTone ? 0.06 : 0.045);
-    }
-}
-
-function getRefereeVoiceText(strikes, balls) {
-    if (strikes === DIGIT_COUNT) return '홈런!';
-    if (strikes === 0 && balls === 0) return '아웃!';
-
-    const countWords = ['', '원', '투', '쓰리', '포'];
-    const parts = [];
-    if (strikes > 0) parts.push(`${countWords[strikes] || strikes} 스트라이크`);
-    if (balls > 0) parts.push(`${countWords[balls] || balls} 볼`);
-    return `${parts.join(' ')}!`;
-}
-
-function getPreferredUmpireVoice() {
-    if (!('speechSynthesis' in window) || !window.speechSynthesis.getVoices) return null;
-    const voices = window.speechSynthesis.getVoices();
-    const koVoices = voices.filter(voice => voice.lang && voice.lang.toLowerCase().startsWith('ko'));
-    const maleHints = /(injoon|joon|male|man|남성|남자)/i;
-    return koVoices.find(voice => maleHints.test(`${voice.name} ${voice.voiceURI}`))
-        || voices.find(voice => maleHints.test(`${voice.name} ${voice.voiceURI}`))
-        || koVoices[0]
-        || null;
-}
-
-function speakReferee(text, delay = 120) {
-    try {
-        if (!('speechSynthesis' in window) || !window.SpeechSynthesisUtterance) return;
-        window.speechSynthesis.cancel();
-
-        const utterance = new SpeechSynthesisUtterance(text);
-        const voice = getPreferredUmpireVoice();
-        if (voice) utterance.voice = voice;
-
-        utterance.lang = 'ko-KR';
-        utterance.rate = text === '플레이볼!' ? 0.9 : 0.96;
-        utterance.pitch = 0.42;
-        utterance.volume = 1;
-        setTimeout(() => window.speechSynthesis.speak(utterance), delay);
-    } catch (err) {
-        // Sound feedback is optional; never block gameplay.
-    }
-}
-
-function announcePlayBall() {
-    playStartMusic();
-    speakReferee('플레이볼!', 360);
-}
-
-function getResultVoiceText(strikes, balls) {
-    return getRefereeVoiceText(strikes, balls);
-}
-
-function playResultJingle(strikes, balls) {
-    playUmpireCue(strikes, balls);
-}
-
-function speakResult(strikes, balls) {
-    playUmpireCue(strikes, balls);
-    speakReferee(getRefereeVoiceText(strikes, balls), 120);
-}
-
-function getRefereeVoiceText(strikes, balls) {
-    if (strikes === DIGIT_COUNT) return '홈런!';
-    if (strikes === 0 && balls === 0) return '아웃!';
-
-    const countWords = ['', '원', '투', '쓰리', '포'];
-    const parts = [];
-    if (strikes > 0) parts.push(`${countWords[strikes] || strikes} 스트라이크`);
-    if (balls > 0) parts.push(`${countWords[balls] || balls} 볼`);
-    return `${parts.join(' ')}!`;
-}
-
-function warmUpSpeechSynthesis() {
-    try {
-        if ('speechSynthesis' in window && window.speechSynthesis.getVoices) {
-            window.speechSynthesis.getVoices();
-        }
-    } catch (err) {
-        // Optional browser capability.
-    }
-}
-
-function speakReferee(text) {
-    try {
-        if (!('speechSynthesis' in window) || !window.SpeechSynthesisUtterance) return;
-        warmUpSpeechSynthesis();
-
-        if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
-            window.speechSynthesis.cancel();
-        }
-
-        const utterance = new SpeechSynthesisUtterance(text);
-        const voice = getPreferredUmpireVoice();
-        if (voice) utterance.voice = voice;
-
-        utterance.lang = 'ko-KR';
-        utterance.rate = text === '플레이볼!' ? 0.9 : 0.96;
-        utterance.pitch = 0.42;
-        utterance.volume = 1;
-        utterance.onend = () => {
-            if (activeSpeechUtterance === utterance) activeSpeechUtterance = null;
-        };
-        utterance.onerror = () => {
-            if (activeSpeechUtterance === utterance) activeSpeechUtterance = null;
-        };
-
-        activeSpeechUtterance = utterance;
-        window.speechSynthesis.speak(utterance);
-    } catch (err) {
-        // Sound feedback is optional; never block gameplay.
-    }
-}
-
-function announcePlayBall() {
-    speakReferee('플레이볼!');
-    playStartMusic();
-}
-
-function speakResult(strikes, balls) {
-    speakReferee(getRefereeVoiceText(strikes, balls));
-    playUmpireCue(strikes, balls);
+    pollFailureCount = 0;
+    networkWarningActive = false;
+    lastWarnedTurnStartedAt = 0;
+    pollInFlight = false;
+    locallyRecordedRoomCode = '';
 }
 
 function requestRoomNotificationPermission() {
     try {
         if ('Notification' in window && Notification.permission === 'default') {
             Notification.requestPermission().catch(() => {});
-        }
-    } catch (err) {
-        // Browser notifications are optional.
-    }
-}
-
-function notifyGuestJoined(guest) {
-    const guestName = (guest && guest.name) ? guest.name : '상대방';
-    TossBridge.vibrate('heavy');
-    playTone(660, 0, 0.08, 'triangle', 0.08);
-    playTone(880, 0.10, 0.14, 'triangle', 0.09);
-    speakReferee(`${guestName}님 입장!`);
-
-    try {
-        if ('Notification' in window && Notification.permission === 'granted') {
-            new Notification('상대방 입장', {
-                body: `${guestName}님이 방에 들어왔습니다.`,
-                silent: true
-            });
-        }
-    } catch (err) {
-        // Browser notifications are optional.
-    }
-}
-
-const UMPIRE_AUDIO_BASE = 'assets/audio/umpire/';
-const UMPIRE_AUDIO_FILES = {
-    playball: 'playball.wav',
-    guest_join: 'guest_join.wav',
-    out: 'out.wav',
-    homerun: 'homerun.wav',
-    s0b1: 's0b1.wav',
-    s0b2: 's0b2.wav',
-    s0b3: 's0b3.wav',
-    s0b4: 's0b4.wav',
-    s1b0: 's1b0.wav',
-    s1b1: 's1b1.wav',
-    s1b2: 's1b2.wav',
-    s1b3: 's1b3.wav',
-    s2b0: 's2b0.wav',
-    s2b1: 's2b1.wav',
-    s2b2: 's2b2.wav',
-    s3b0: 's3b0.wav',
-    s3b1: 's3b1.wav'
-};
-const umpireAudioCache = {};
-
-function warmUpSpeechSynthesis() {
-    preloadStartAudio();
-}
-
-function preloadUmpireAudio() {
-    Object.keys(UMPIRE_AUDIO_FILES).forEach(key => {
-        if (umpireAudioCache[key]) return;
-        const audio = new Audio(`${UMPIRE_AUDIO_BASE}${UMPIRE_AUDIO_FILES[key]}`);
-        audio.preload = 'auto';
-        audio.volume = 1;
-        umpireAudioCache[key] = audio;
-    });
-}
-
-function getUmpireAudioKey(strikes, balls) {
-    if (strikes === DIGIT_COUNT) return 'homerun';
-    if (strikes === 0 && balls === 0) return 'out';
-    return `s${strikes}b${balls}`;
-}
-
-function playUmpireAudio(key) {
-    const file = UMPIRE_AUDIO_FILES[key];
-    if (!file) return false;
-
-    try {
-        const cached = umpireAudioCache[key] || new Audio(`${UMPIRE_AUDIO_BASE}${file}`);
-        umpireAudioCache[key] = cached;
-        const audio = cached.cloneNode(true);
-        audio.volume = 1;
-        const playPromise = audio.play();
-        if (playPromise && typeof playPromise.catch === 'function') {
-            playPromise.catch(err => {
-                console.warn('Umpire audio blocked or missing:', key, err);
-            });
-        }
-        return true;
-    } catch (err) {
-        console.warn('Umpire audio failed:', key, err);
-        return false;
-    }
-}
-
-function speakReferee(text) {
-    if (text && text.indexOf('입장') !== -1) {
-        playUmpireAudio('guest_join');
-    }
-}
-
-function announcePlayBall() {
-    playStartMusic();
-    playUmpireAudio('playball');
-}
-
-function speakResult(strikes, balls) {
-    playUmpireCue(strikes, balls);
-    playUmpireAudio(getUmpireAudioKey(strikes, balls));
-}
-
-function notifyGuestJoined(guest) {
-    const guestName = (guest && guest.name) ? guest.name : '상대방';
-    TossBridge.vibrate('heavy');
-    playTone(660, 0, 0.08, 'triangle', 0.08);
-    playTone(880, 0.10, 0.14, 'triangle', 0.09);
-    playUmpireAudio('guest_join');
-
-    try {
-        if ('Notification' in window && Notification.permission === 'granted') {
-            new Notification('상대방 입장', {
-                body: `${guestName}님이 방에 들어왔습니다.`,
-                silent: true
-            });
         }
     } catch (err) {
         // Browser notifications are optional.
@@ -622,7 +378,8 @@ function speakResult() {
 
 function notifyGuestJoined(guest) {
     const guestName = (guest && guest.name) ? guest.name : '상대방';
-    TossBridge.vibrate('heavy');
+    GameBridge.vibrate('heavy');
+    showToast(`${guestName}님이 대전방에 입장했습니다.`, 'success', 4200);
 
     try {
         if ('Notification' in window && Notification.permission === 'granted') {
@@ -652,16 +409,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }, 900);
 
-    // 1. Initialize Profile via TossBridge
-    TossBridge.getProfile().then(profile => {
+        // 1. Initialize Profile
+    GameBridge.getProfile().then(profile => {
         mergePlayerProfile(profile);
+        const localStats = loadLocalStatsBackup();
+        if (localStats && localStats.games > myPlayer.games) {
+            mergePlayerProfile(localStats);
+        }
         updateLobbyProfileName();
+        updateMyNameDisplays();
+        updateLobbyStatsUI();
         
-        // Load stats from local server or localStorage
-        syncPlayerStats();
-        
-        // Initialize global rankings
-        initRankings();
+        // Restore the authoritative record first, then calculate the leaderboard.
+        syncPlayerStats().then(() => initRankings());
 
         // 1.1 Check if room query parameter exists for Auto-Join
         const urlParams = new URLSearchParams(window.location.search);
@@ -676,7 +436,7 @@ document.addEventListener('DOMContentLoaded', () => {
             window.isAutomatedTest = true; // bypass confirmation dialogs
             if (screenshotParam === 'lobby') {
                 // Populate rankings and profile stats with realistic mock data
-                myPlayer.name = "김토스";
+                myPlayer.name = "알쏭달쏭";
                 myPlayer.wins = 12;
                 myPlayer.losses = 3;
                 myPlayer.rate = 80.0;
@@ -725,27 +485,45 @@ document.addEventListener('DOMContentLoaded', () => {
                     secretNumbers = [1, 2, 3, 4];
                     endGame(true, 5);
                 }, 1000);
+            } else if (screenshotParam === 'timer_warning') {
+                setTimeout(() => {
+                    gameMode = 'multi';
+                    myRole = 'host';
+                    currentRoomCode = 'SAND';
+                    startMultiGame({
+                        status: 'playing',
+                        currentTurn: 'host',
+                        host: { name: myPlayer.name },
+                        guest: { name: '대전 상대' },
+                        secrets: { host: [], guest: [] }
+                    });
+                    const timerContainer = document.getElementById('turn-timer-container');
+                    const timerValue = document.getElementById('turn-timer-value');
+                    if (timerContainer && timerValue) {
+                        timerValue.textContent = TIMER_WARNING_SECONDS;
+                        timerContainer.style.display = 'inline-flex';
+                        timerContainer.classList.add('timer-warning');
+                    }
+                }, 1000);
             }
         }
+    }).catch(error => {
+        mergePlayerProfile({ name: '게스트', id: 'AUTH-PENDING' });
+        updateLobbyProfileName();
+        updateMyNameDisplays();
+        updateLobbyStatsUI();
+        showToast(`1:1 인증 준비가 필요합니다: ${error.message}`, 'warning', 6000);
     });
 
     // 2. Setup Profile Nickname Modifier
     const profileBar = document.getElementById('lobby-profile-bar');
     if (profileBar) {
         profileBar.addEventListener('click', () => {
-            const currentName = myPlayer.name || '';
-            const newName = prompt("변경할 닉네임을 입력해 주세요 (2~8글자):", currentName);
-            if (newName && newName.trim().length >= 2) {
-                TossBridge.updateProfileName(newName).then(updated => {
-                    if (updated) {
-                        mergePlayerProfile(updated);
-                        updateLobbyProfileName();
-                        
-                        // Sync with local server
-                        saveRankingToServer();
-                    }
-                });
+            if (accountNicknameInput) accountNicknameInput.value = myPlayer.name || '';
+            if (accountRecordValue) {
+                accountRecordValue.textContent = `${myPlayer.wins}승 ${myPlayer.losses}패 · ${myPlayer.rating}점`;
             }
+            openModal(accountModal);
         });
     }
 });
@@ -756,21 +534,15 @@ document.addEventListener('DOMContentLoaded', () => {
 function autoJoinRoomFromUrl(inputCode) {
     const data = {
         room: inputCode,
-        guestId: myPlayer.id,
         guestName: myPlayer.name
     };
 
-    fetch(`${API_BASE}/api/join`, {
+    apiFetch('/api/join', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
     })
-    .then(res => {
-        if (!res.ok) {
-            return res.json().then(e => { throw new Error(e.error || '접속 실패') });
-        }
-        return res.json();
-    })
+    .then(readApiResponse)
     .then(room => {
         gameMode = 'multi';
         myRole = 'guest';
@@ -796,6 +568,7 @@ function autoJoinRoomFromUrl(inputCode) {
         resetRealtimeRenderCache();
         pollInterval = setInterval(pollRoomState, 800);
         showScreen('screen-waiting');
+        showToast(`${room.host.name}님의 대전방에 입장했습니다.`, 'success');
     })
     .catch(err => {
         console.warn("Auto-join failed:", err.message);
@@ -810,7 +583,7 @@ function autoJoinRoomFromUrl(inputCode) {
 function refreshPublicRooms() {
     if (window.isAutomatedTest) return; // skip in automated test
 
-    fetch(`${API_BASE}/api/rooms`)
+    apiFetch('/api/rooms')
     .then(res => res.json())
     .then(rooms => {
         const container = document.getElementById('public-rooms-list');
@@ -863,57 +636,58 @@ function refreshPublicRooms() {
  * Handles joining a public room from the lobby list.
  */
 function joinPublicRoom(code) {
-    if (window.isAutomatedTest || confirm(`${code}번 방에 입장하시겠습니까?`)) {
-        autoJoinRoomFromUrl(code);
-    }
+    showConfirmDialog({
+        title: '대전방 참가',
+        message: `${code}번 방에 입장하시겠습니까?`,
+        confirmText: '입장하기',
+        icon: 'fa-arrow-right-to-bracket'
+    }).then(confirmed => {
+        if (confirmed) autoJoinRoomFromUrl(code);
+    });
 }
 window.joinPublicRoom = joinPublicRoom;
 
 /**
- * Sync player wins and losses from database or localstorage.
+ * Sync the local backup with the server and use the newest complete record.
  */
 function syncPlayerStats() {
-    // Fetch rankings list from server to locate player record
-    fetch(`${API_BASE}/api/rankings`)
-        .then(res => res.json())
-        .then(players => {
-            const record = players.find(p => p.id === myPlayer.id);
-            if (record) {
-                myPlayer.wins = record.wins || 0;
-                myPlayer.losses = record.losses || 0;
-                myPlayer.rate = record.rate || 0;
-            } else {
-                saveRankingToServer();
-            }
-            updateLobbyStatsUI();
+    return apiFetch('/api/me/bootstrap', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            name: myPlayer.name
         })
-        .catch(err => {
-            console.warn("REST Server offline, loading localStorage stats.");
-            // Offline fallback: localStorage
-            try {
-                const wins = parseInt(localStorage.getItem('toss_baseball_wins') || '0');
-                const losses = parseInt(localStorage.getItem('toss_baseball_losses') || '0');
-                myPlayer.wins = wins;
-                myPlayer.losses = losses;
-                myPlayer.rate = parseFloat(((wins / Math.max(1, wins + losses)) * 100).toFixed(1));
-            } catch (e) {}
+    })
+        .then(readApiResponse)
+        .then(response => {
+            if (response.player) mergePlayerProfile(response.player);
+            persistLocalStats();
             updateLobbyStatsUI();
+            return myPlayer;
+        })
+        .catch(error => {
+            console.warn('Stats server unavailable; using device backup.', error);
+            updateLobbyStatsUI();
+            return myPlayer;
         });
 }
 
 function saveRankingToServer() {
-    const data = {
-        id: myPlayer.id,
-        name: myPlayer.name,
-        wins: myPlayer.wins || 0,
-        losses: myPlayer.losses || 0,
-        rate: myPlayer.rate || 0
-    };
-    fetch(`${API_BASE}/api/ranking`, {
-        method: 'POST',
+    const data = { name: myPlayer.name };
+    persistLocalStats();
+    return apiFetch('/api/me', {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
-    }).catch(() => {});
+    })
+        .then(readApiResponse)
+        .then(response => {
+            if (response.player) mergePlayerProfile(response.player);
+            persistLocalStats();
+            updateLobbyStatsUI();
+            return myPlayer;
+        })
+        .catch(() => myPlayer);
 }
 
 function updateLobbyStatsUI() {
@@ -922,37 +696,65 @@ function updateLobbyStatsUI() {
     if (safeStatsEl) {
         safeStatsEl.textContent = `전적: ${myPlayer.wins}승 ${myPlayer.losses}패 (승률 ${myPlayer.rate}%)`;
     }
-    return;
-    myPlayer = normalizePlayerStats(myPlayer);
-    const statsEl = document.getElementById('lobby-profile-stats');
-    if (statsEl) {
-        statsEl.textContent = `전적: ${myPlayer.wins}승 ${myPlayer.losses}패 (승률 ${myPlayer.rate}%)`;
+}
+
+function updateMyRankSummary(players) {
+    const rankValue = document.getElementById('my-rank-position');
+    const rankDetail = document.getElementById('my-rank-detail');
+    if (!rankValue || !rankDetail) return;
+
+    const rankedPlayers = players.filter(player => player.games > 0);
+    const myIndex = rankedPlayers.findIndex(player => player.isMe);
+    if (myIndex < 0) {
+        rankValue.textContent = '기록 없음';
+        rankDetail.textContent = '첫 1:1 대전 후 순위가 집계됩니다.';
+        return;
     }
+
+    const rank = myIndex + 1;
+    const percentile = Math.max(1, Math.ceil((rank / rankedPlayers.length) * 100));
+    const record = rankedPlayers[myIndex];
+    rankValue.textContent = `${rank}위`;
+    rankDetail.textContent = `상위 ${percentile}% · 레이팅 ${record.rating}점`;
 }
 
 /**
  * Initializes the global rankings / leaderboard.
  */
 function initRankings() {
-    fetch(`${API_BASE}/api/rankings`)
-        .then(res => res.json())
+    return apiFetch('/api/rankings')
+        .then(readApiResponse)
         .then(players => {
-            // Sort by win rate, then wins descending
-            players.sort((a, b) => b.rate - a.rate || b.wins - a.wins);
-            renderLeaderboard(players);
+            const normalizedPlayers = players.map(player => ({
+                ...normalizePlayerStats(player),
+                isMe: Boolean(player.isMe)
+            }));
+            normalizedPlayers.sort((a, b) => (
+                b.rating - a.rating
+                || b.wins - a.wins
+                || a.losses - b.losses
+            ));
+
+            const serverMe = normalizedPlayers.find(player => player.isMe);
+            if (serverMe) {
+                mergePlayerProfile(serverMe);
+                persistLocalStats();
+                updateLobbyStatsUI();
+            }
+
+            updateMyRankSummary(normalizedPlayers);
+            renderLeaderboard(normalizedPlayers.filter(player => player.games > 0));
+            return normalizedPlayers;
         })
-        .catch(err => {
-            // Fallback to local mock data
-            const localList = [...mockRankings];
-            localList.push({
-                name: myPlayer.name,
-                wins: myPlayer.wins,
-                losses: myPlayer.losses,
-                rate: myPlayer.rate,
-                isMe: true
-            });
-            localList.sort((a, b) => b.rate - a.rate);
-            renderLeaderboard(localList);
+        .catch(error => {
+            console.warn('Leaderboard server unavailable:', error);
+            const localPlayer = { ...normalizePlayerStats(myPlayer), isMe: true };
+            updateMyRankSummary([]);
+            renderLeaderboard(localPlayer.games > 0 ? [localPlayer] : []);
+            const detail = document.getElementById('my-rank-detail');
+            if (detail) detail.textContent = '서버 연결 후 순위를 확인할 수 있습니다.';
+            showToast('랭킹 서버 연결이 잠시 불안정합니다.', 'warning');
+            return [];
         });
 }
 
@@ -975,6 +777,9 @@ function showScreen(screenId) {
     closeModal(rulesModal);
     closeModal(resultModal);
     closeModal(joinModal);
+    if (messageModal && !messageModal.classList.contains('hidden')) {
+        closeMessageDialog(false);
+    }
 
     // Manage Public Rooms list polling interval
     if (screenId === 'screen-lobby') {
@@ -1018,6 +823,7 @@ safeAddListener('btn-menu-create', 'click', () => {
     myRole = 'host';
     isGameOver = false;
     requestRoomNotificationPermission();
+    updateMyNameDisplays();
 
     // Setup host UI
     document.getElementById('opponent-name').textContent = '상대 대기 중...';
@@ -1047,13 +853,13 @@ safeAddListener('btn-menu-create', 'click', () => {
     }
 
     // Call REST server to generate room
-    const data = { hostId: myPlayer.id, hostName: myPlayer.name };
-    fetch(`${API_BASE}/api/create`, {
+    const data = { hostName: myPlayer.name };
+    apiFetch('/api/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
     })
-    .then(res => res.json())
+    .then(readApiResponse)
     .then(room => {
         currentRoomCode = room.code;
         document.getElementById('room-code-value').textContent = currentRoomCode;
@@ -1062,13 +868,16 @@ safeAddListener('btn-menu-create', 'click', () => {
         resetRealtimeRenderCache();
         pollInterval = setInterval(pollRoomState, 800);
         showScreen('screen-waiting');
+        showToast(`대전방 ${room.code}번을 만들었습니다.`, 'success');
     })
     .catch(err => {
         if (!window.isAutomatedTest) {
-            alert("대전 서버 연결 실패! 오프라인 연습 봇 모드를 가동합니다.");
-        } else {
-            console.warn("REST Server offline during test, fallback to sandbox.");
+            gameMode = 'solo';
+            showScreen('screen-lobby');
+            showToast('대전 서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.', 'error', 4500);
+            return;
         }
+        console.warn("REST Server offline during test, fallback to sandbox.");
         gameMode = 'multi';
         opponentName = '연습 봇';
         currentRoomCode = 'SAND';
@@ -1091,30 +900,89 @@ safeAddListener('btn-menu-join', 'click', () => {
 
 safeAddListener('btn-close-join', 'click', () => closeModal(joinModal));
 
+safeAddListener('btn-close-account', 'click', () => closeModal(accountModal));
+
+safeAddListener('btn-save-account-name', 'click', () => {
+    const nextName = accountNicknameInput ? accountNicknameInput.value.trim() : '';
+    if (nextName.length < 2) {
+        showToast('닉네임은 2글자 이상 입력해 주세요.', 'warning');
+        return;
+    }
+    GameBridge.updateProfileName(nextName).then(updated => {
+        if (!updated) throw new Error('닉네임을 저장하지 못했습니다.');
+        mergePlayerProfile(updated);
+        return saveRankingToServer();
+    }).then(() => {
+        updateLobbyProfileName();
+        updateMyNameDisplays();
+        closeModal(accountModal);
+        showToast('닉네임을 변경했습니다.', 'success');
+    }).catch(error => showToast(error.message, 'error'));
+});
+
+safeAddListener('btn-reset-record', 'click', () => {
+    showConfirmDialog({
+        title: '현재 시즌 전적 초기화',
+        message: '승패와 레이팅을 0승 0패, 1000점으로 초기화합니다.',
+        confirmText: '초기화',
+        icon: 'fa-rotate-left'
+    }).then(confirmed => {
+        if (!confirmed) return null;
+        return apiFetch('/api/me/record', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirmation: 'RESET' })
+        }).then(readApiResponse);
+    }).then(response => {
+        if (!response || !response.player) return;
+        mergePlayerProfile(response.player);
+        persistLocalStats();
+        updateLobbyStatsUI();
+        if (accountRecordValue) accountRecordValue.textContent = '0승 0패 · 1000점';
+        showToast('현재 시즌 전적을 초기화했습니다.', 'success');
+    }).catch(error => showToast(error.message, 'error'));
+});
+
+safeAddListener('btn-delete-account', 'click', () => {
+    showConfirmDialog({
+        title: '계정과 기록 삭제',
+        message: '닉네임과 모든 시즌 전적을 삭제합니다. 이 작업은 되돌릴 수 없습니다.',
+        confirmText: '완전 삭제',
+        icon: 'fa-user-xmark'
+    }).then(confirmed => {
+        if (!confirmed) return null;
+        return apiFetch('/api/me', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirmation: 'DELETE' })
+        }).then(readApiResponse);
+    }).then(response => {
+        if (!response || !response.success) return;
+        window.AuthClient.clearSession();
+        localStorage.removeItem(STORAGE_KEY_STATS);
+        localStorage.removeItem('homerun_baseball_user_profile');
+        window.location.reload();
+    }).catch(error => showToast(error.message, 'error'));
+});
+
 safeAddListener('btn-submit-join', 'click', () => {
     const inputCode = document.getElementById('join-room-input').value.trim();
     if (inputCode.length !== 4) {
-        alert("올바른 4자리 방 번호를 입력해 주세요.");
+        showToast('올바른 4자리 방 번호를 입력해 주세요.', 'warning');
         return;
     }
 
     const data = {
         room: inputCode,
-        guestId: myPlayer.id,
         guestName: myPlayer.name
     };
 
-    fetch(`${API_BASE}/api/join`, {
+    apiFetch('/api/join', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
     })
-    .then(res => {
-        if (!res.ok) {
-            return res.json().then(e => { throw new Error(e.error || '접속 실패') });
-        }
-        return res.json();
-    })
+    .then(readApiResponse)
     .then(room => {
         gameMode = 'multi';
         myRole = 'guest';
@@ -1139,9 +1007,10 @@ safeAddListener('btn-submit-join', 'click', () => {
         pollInterval = setInterval(pollRoomState, 800);
         
         showScreen('screen-waiting');
+        showToast(`${room.host.name}님의 대전방에 입장했습니다.`, 'success');
     })
     .catch(err => {
-        alert("참가 오류: " + err.message);
+        showToast(`방 참가 실패: ${err.message}`, 'error', 4500);
     });
 });
 
@@ -1152,9 +1021,9 @@ safeAddListener('btn-menu-rankings', 'click', () => {
 
 // Copy room code to clipboard
 safeAddListener('btn-copy-code', 'click', () => {
-    TossBridge.shareRoomCode(currentRoomCode).then(() => {
-        TossBridge.vibrate('light');
-        alert("방 초대 메시지가 클립보드에 복사되었습니다! 친구에게 공유해 보세요.");
+    GameBridge.shareRoomCode(currentRoomCode).then(() => {
+        GameBridge.vibrate('light');
+        showToast('방 초대 메시지를 복사했습니다.', 'success');
     });
 });
 
@@ -1162,28 +1031,69 @@ safeAddListener('btn-copy-code', 'click', () => {
    REST API GAME STATE POLLING LOOP
    ========================================================================== */
 
-function pollRoomState() {
-    if (!currentRoomCode || gameMode !== 'multi') return;
+function updateTurnTimer(room) {
+    const timerContainer = document.getElementById('turn-timer-container');
+    const timerValue = document.getElementById('turn-timer-value');
+    if (!timerContainer || !timerValue) return;
 
-    fetch(`${API_BASE}/api/poll?room=${currentRoomCode}&role=${myRole}`)
-    .then(res => res.json())
-    .then(room => {
-        // 1. Live Turn timer update (runs every poll, bypassing redrawing cache)
-        const timerContainer = document.getElementById('turn-timer-container');
-        if (room.status === 'playing' && currentScreen === 'screen-game') {
-            const timerValue = document.getElementById('turn-timer-value');
-            if (timerContainer && timerValue && room.turnStartedAt) {
-                timerContainer.style.display = 'inline-flex';
-                const elapsed = Date.now() - room.turnStartedAt;
-                const remaining = Math.max(0, Math.ceil((60000 - elapsed) / 1000));
-                timerValue.textContent = remaining;
-            }
-        } else {
-            if (timerContainer) timerContainer.style.display = 'none';
-        }
+    if (room.status !== 'playing' || currentScreen !== 'screen-game' || !room.turnStartedAt) {
+        timerContainer.style.display = 'none';
+        timerContainer.classList.remove('timer-warning');
+        return;
+    }
 
-        // 2. Prevent redundant redraws if visible game state is unchanged.
-        // Poll updates player lastActive frequently, but that should not redraw attack history.
+    const duration = Number(room.turnDurationMs) || TURN_TIMEOUT_MS;
+    const elapsed = Date.now() - Number(room.turnStartedAt);
+    const remaining = Math.max(0, Math.ceil((duration - elapsed) / 1000));
+    const shouldWarn = room.currentTurn === myRole && remaining <= TIMER_WARNING_SECONDS;
+
+    timerContainer.style.display = 'inline-flex';
+    timerValue.textContent = remaining;
+    timerContainer.classList.toggle('timer-warning', shouldWarn);
+
+    if (shouldWarn && lastWarnedTurnStartedAt !== room.turnStartedAt) {
+        lastWarnedTurnStartedAt = room.turnStartedAt;
+        GameBridge.vibrate('heavy');
+        showToast('내 공격 시간이 20초 남았습니다.', 'warning', 3500);
+    }
+}
+
+function markPollRecovered() {
+    if (networkWarningActive) {
+        showToast('대전 서버에 다시 연결되었습니다.', 'success');
+    }
+    pollFailureCount = 0;
+    networkWarningActive = false;
+}
+
+function markPollFailed(error) {
+    pollFailureCount += 1;
+    console.error('Polling error:', error);
+
+    if (pollFailureCount >= 3 && !networkWarningActive) {
+        networkWarningActive = true;
+        showToast('연결이 불안정합니다. 재접속을 시도하고 있습니다.', 'warning', 5000);
+    }
+}
+
+async function pollRoomState() {
+    if (!currentRoomCode || gameMode !== 'multi' || pollInFlight || isGameOver) return;
+    pollInFlight = true;
+
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const requestTimeout = window.setTimeout(() => {
+        if (controller) controller.abort();
+    }, 6000);
+
+    try {
+        const response = await apiFetch(
+            `/api/poll?room=${encodeURIComponent(currentRoomCode)}&role=${encodeURIComponent(myRole)}`,
+            controller ? { signal: controller.signal } : undefined
+        );
+        const room = await readApiResponse(response);
+        markPollRecovered();
+        updateTurnTimer(room);
+
         const roomJson = JSON.stringify({
             status: room.status,
             currentTurn: room.currentTurn,
@@ -1192,12 +1102,13 @@ function pollRoomState() {
             host: room.host ? { name: room.host.name, status: room.host.status } : null,
             guest: room.guest ? { name: room.guest.name, status: room.guest.status } : null,
             guesses: room.guesses,
-            secrets: room.secrets
+            secrets: room.secrets,
+            playerStats: room.playerStats,
+            ratingChange: room.ratingChange
         });
         if (roomJson === lastRoomDataJson) return;
         lastRoomDataJson = roomJson;
 
-        // 3. Guest Joins
         if (room.status === 'setup' && myRole === 'host' && room.guest) {
             const guestKey = room.guest.id || room.guest.name || 'guest';
             if (guestKey !== lastNotifiedGuestId) {
@@ -1211,46 +1122,55 @@ function pollRoomState() {
             document.getElementById('opponent-status').className = 'player-status ready';
         }
 
-        // 4. Setup Status (Show 'Ready' when other submits secret)
         if (room.status === 'setup' || room.status === 'playing') {
-            if (myRole === 'host' && room.guest) {
-                if (room.guest.status === 'ready') {
-                    document.getElementById('opponent-status').textContent = '준비 완료';
-                }
-            } else if (myRole === 'guest' && room.host) {
-                if (room.host.status === 'ready') {
-                    document.getElementById('opponent-status').textContent = '준비 완료';
-                }
+            if (myRole === 'host' && room.guest && room.guest.status === 'ready') {
+                document.getElementById('opponent-status').textContent = '준비 완료';
+            } else if (myRole === 'guest' && room.host && room.host.status === 'ready') {
+                document.getElementById('opponent-status').textContent = '준비 완료';
             }
         }
 
-        // 5. Match Starts (Setup secrets done)
         if (room.status === 'playing' && currentScreen !== 'screen-game') {
             startMultiGame(room);
         }
 
-        // 6. Live Gameplay Guesses Update
         if (room.status === 'playing' && currentScreen === 'screen-game') {
             syncRealtimeGuesses(room);
         }
 
-        // 7. Game Over
         if (room.status === 'finished') {
             clearInterval(pollInterval);
             pollInterval = null;
-            
             const isWin = room.winner === myRole;
             if (room.secrets) {
                 const oppRole = myRole === 'host' ? 'guest' : 'host';
                 secretNumbers = room.secrets[oppRole] || secretNumbers;
             }
-            const myGuessesList = room.guesses ? (room.guesses[myRole] ? Object.values(room.guesses[myRole]) : []) : [];
-            endGame(isWin, myGuessesList.length + 1, room.winner !== myRole, room.reason);
+            const myGuessesList = room.guesses && room.guesses[myRole]
+                ? Object.values(room.guesses[myRole])
+                : [];
+            endGame(
+                isWin,
+                myGuessesList.length,
+                room.winner !== myRole,
+                room.reason,
+                room.playerStats,
+                room.ratingChange
+            );
         }
-    })
-    .catch(err => {
-        console.error("Polling error:", err);
-    });
+    } catch (error) {
+        markPollFailed(error);
+        if (error.status === 404 && pollFailureCount >= 3) {
+            clearInterval(pollInterval);
+            pollInterval = null;
+            isGameOver = true;
+            showScreen('screen-lobby');
+            showToast('대전방 연결이 종료되었습니다. 새 방에서 다시 시작해 주세요.', 'error', 5000);
+        }
+    } finally {
+        window.clearTimeout(requestTimeout);
+        pollInFlight = false;
+    }
 }
 
 /* ==========================================================================
@@ -1286,6 +1206,7 @@ function startSoloGame() {
     oppHistoryContainer.innerHTML = '<div class="empty-placeholder-mini">봇은 수비 중입니다.</div>';
 
     loadBestScore();
+    updateMyNameDisplays();
     enableKeypad();
     showScreen('screen-game');
     announcePlayBall();
@@ -1340,6 +1261,7 @@ function startMultiGame(roomData) {
         secretNumbers = generateSecretNumber();
     }
 
+    updateMyNameDisplays();
     enableKeypad();
     showScreen('screen-game');
     announcePlayBall();
@@ -1530,13 +1452,22 @@ function submitSecretNumberSetup() {
             role: myRole,
             secret: mySecretNumbers
         };
-        fetch(`${API_BASE}/api/ready`, {
+        apiFetch('/api/ready', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data)
-        }).catch(() => {
-            alert("준비 설정 송신 실패!");
-        });
+        })
+            .then(readApiResponse)
+            .then(room => {
+                showToast('수비 숫자 설정을 완료했습니다.', 'success');
+                if (room.status === 'playing' && currentScreen !== 'screen-game') {
+                    startMultiGame(room);
+                }
+            })
+            .catch(error => {
+                document.getElementById('btn-ready-start').disabled = false;
+                showToast(`준비 설정 실패: ${error.message}`, 'error', 4500);
+            });
     } else {
         // Offline Demo fallback
         opponentName = '연습 봇';
@@ -1557,7 +1488,7 @@ function submitSecretNumberSetup() {
 function handleNumberInput(num) {
     if (currentGuess.length < DIGIT_COUNT && !currentGuess.includes(num)) {
         currentGuess.push(num);
-        TossBridge.vibrate('light');
+        GameBridge.vibrate('light');
         updateSlots();
     }
 }
@@ -1565,7 +1496,7 @@ function handleNumberInput(num) {
 function handleBackspace() {
     if (currentGuess.length > 0) {
         currentGuess.pop();
-        TossBridge.vibrate('light');
+        GameBridge.vibrate('light');
         updateSlots();
     }
 }
@@ -1633,11 +1564,11 @@ function disableKeypad() {
 
 function handleSubmitGuess() {
     if (currentGuess.length !== DIGIT_COUNT) {
-        alert("4자리 숫자를 모두 채워주세요.");
+        showToast('서로 다른 숫자 4개를 모두 입력해 주세요.', 'warning');
         return;
     }
 
-    TossBridge.vibrate('heavy');
+    GameBridge.vibrate('heavy');
 
     // Calculate Strikes and Balls
     let strikes = 0;
@@ -1675,27 +1606,27 @@ function handleSubmitGuess() {
     } else {
         if (currentRoomCode !== 'SAND') {
             // Push only the guess to REST API. The server calculates S/B/O from the opponent's real secret.
+            const submittedGuess = [...currentGuess];
             const data = {
                 room: currentRoomCode,
                 role: myRole,
-                guess: currentGuess,
+                guess: submittedGuess,
                 attempt: attemptNumber
             };
 
             currentGuess = [];
             updateSlots();
 
-            fetch(`${API_BASE}/api/guess`, {
+            apiFetch('/api/guess', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data)
-            }).then(res => {
-                if (!res.ok) throw new Error('guess submit failed');
-                return res.json();
-            }).then(room => {
+            }).then(readApiResponse).then(room => {
                 syncRealtimeGuesses(room);
-            }).catch(() => {
-                alert("투구 데이터 송신 실패!");
+            }).catch(error => {
+                currentGuess = submittedGuess;
+                updateSlots();
+                showToast(`공격 전송 실패: ${error.message}`, 'error', 4500);
             });
         } else {
             // Offline Sandbox Bot Game fallback
@@ -1789,7 +1720,23 @@ function appendHistoryItem(container, attempt, guessArr, strikes, balls) {
    GAME END ACTIONS & RESULT MODAL
    ========================================================================== */
 
-function endGame(isWin, attemptsUsed, isOpponentWin = false, reason = "win") {
+function applyCompletedMatchStats(isWin, serverStats) {
+    if (gameMode !== 'multi' || currentRoomCode === 'SAND') return;
+
+    if (serverStats) {
+        mergePlayerProfile(serverStats);
+        persistLocalStats();
+        updateLobbyStatsUI();
+        return;
+    }
+
+    // v6 never accepts wins or losses from the device. Re-fetch the server record.
+    if (locallyRecordedRoomCode === currentRoomCode) return;
+    locallyRecordedRoomCode = currentRoomCode;
+    syncPlayerStats();
+}
+
+function endGame(isWin, attemptsUsed, isOpponentWin = false, reason = "win", serverStats = null, ratingChange = 0) {
     try {
         isGameOver = true;
         disableKeypad();
@@ -1798,7 +1745,7 @@ function endGame(isWin, attemptsUsed, isOpponentWin = false, reason = "win") {
         const timerContainer = document.getElementById('turn-timer-container');
         if (timerContainer) timerContainer.style.display = 'none';
 
-        resultSecret.textContent = secretNumbers.join(' ');
+        resultSecret.textContent = secretNumbers.length ? secretNumbers.join(' ') : '-';
         resultAttempts.textContent = `${attemptsUsed} / ${MAX_ATTEMPTS}`;
 
         if (gameMode === 'solo') {
@@ -1828,16 +1775,11 @@ function endGame(isWin, attemptsUsed, isOpponentWin = false, reason = "win") {
                     resultMessage.textContent = `상대방 (${opponentName})의 네트워크 연결이 끊어져 실격승(기권승) 처리되었습니다!`;
                 } else if (reason === 'timeout') {
                     resultTitle.textContent = '🏆 시간초과 승리!';
-                    resultMessage.textContent = `상대방 (${opponentName})의 공격 제한시간(30초) 초과로 시간초과 승리하였습니다!`;
+                    resultMessage.textContent = `상대방 (${opponentName})의 공격 제한시간(60초) 초과로 승리했습니다.`;
                 } else {
                     resultTitle.textContent = '🏆 대전 승리!';
-                    resultMessage.textContent = `상대방 (${opponentName})보다 먼저 숫자를 맞췄습니다! 랭킹 포인트가 상승합니다.`;
+                    resultMessage.textContent = `상대방 (${opponentName})보다 먼저 숫자를 맞췄습니다!`;
                 }
-                
-                // Increment wins
-                myPlayer.wins++;
-                myPlayer.rate = parseFloat(((myPlayer.wins / Math.max(1, myPlayer.wins + myPlayer.losses)) * 100).toFixed(1));
-                saveRankingToServer();
             } else {
                 resultBadge.className = 'result-badge lose';
                 resultBadge.innerHTML = '<i class="fa-solid fa-skull-crossbones"></i>';
@@ -1848,16 +1790,17 @@ function endGame(isWin, attemptsUsed, isOpponentWin = false, reason = "win") {
                     resultMessage.textContent = `내 네트워크 신호가 약해 게임방에서 퇴장 및 기권패 처리되었습니다.`;
                 } else if (reason === 'timeout') {
                     resultTitle.textContent = '💀 시간초과 패배...';
-                    resultMessage.textContent = `내 공격 제한시간(30초) 내에 숫자를 입력하지 못해 시간초과 패배하였습니다!`;
+                    resultMessage.textContent = '내 공격 제한시간(60초) 안에 숫자를 입력하지 못해 패배했습니다.';
                 } else {
                     resultTitle.textContent = '💀 대전 패배...';
                     resultMessage.textContent = `상대방 (${opponentName})이 내 숫자(${mySecretNumbers.join('')})를 먼저 맞췄습니다!`;
                 }
-                
-                // Increment losses
-                myPlayer.losses++;
-                myPlayer.rate = parseFloat(((myPlayer.wins / Math.max(1, myPlayer.wins + myPlayer.losses)) * 100).toFixed(1));
-                saveRankingToServer();
+            }
+
+            applyCompletedMatchStats(isWin, serverStats);
+            if (ratingChange) {
+                const sign = ratingChange > 0 ? '+' : '';
+                resultMessage.textContent += ` 레이팅 ${sign}${ratingChange}점`;
             }
         }
 
@@ -1922,6 +1865,14 @@ function renderLeaderboard(playersList) {
     if (!tbody) return;
     tbody.innerHTML = '';
 
+    if (!playersList.length) {
+        const emptyRow = document.createElement('tr');
+        emptyRow.className = 'ranking-empty-row';
+        emptyRow.innerHTML = '<td colspan="4">아직 집계된 1:1 대전 기록이 없습니다.</td>';
+        tbody.appendChild(emptyRow);
+        return;
+    }
+
     playersList.forEach((player, index) => {
         const tr = document.createElement('tr');
         const rank = index + 1;
@@ -1933,10 +1884,11 @@ function renderLeaderboard(playersList) {
 
         tr.innerHTML = `
             <td>${rankBadge}</td>
-            <td><span class="rank-name ${player.isMe ? 'me' : ''}">${player.name} ${player.isMe ? '(나)' : ''}</span></td>
-            <td><span class="rank-table-stats">${player.wins}승 ${player.losses}패</span></td>
+            <td><span class="rank-name ${player.isMe ? 'me' : ''}"></span></td>
+            <td><span class="rank-table-stats">${player.wins}승 ${player.losses}패</span><small class="rank-rating">${player.rating}점</small></td>
             <td><span class="rank-table-rate ${player.rate >= 75 ? 'high' : ''}">${player.rate}%</span></td>
         `;
+        tr.querySelector('.rank-name').textContent = `${player.name}${player.isMe ? ' (나)' : ''}`;
         tbody.appendChild(tr);
     });
 }
@@ -1998,6 +1950,7 @@ window.onRestartClick = function() {
     console.log("onRestartClick triggered!");
     closeModal(resultModal);
     showScreen('screen-lobby');
+    syncPlayerStats();
 };
 
 // Info modal toggles
@@ -2007,6 +1960,7 @@ safeAddListener('btn-close-rules', 'click', () => closeModal(rulesModal));
 window.addEventListener('click', (e) => {
     if (e.target === rulesModal) closeModal(rulesModal);
     if (e.target === joinModal) closeModal(joinModal);
+    if (e.target === accountModal) closeModal(accountModal);
 });
 
 // Exit game / Restart game to Lobby
@@ -2020,51 +1974,13 @@ safeAddListener('btn-exit-game', 'click', () => {
     showScreen('screen-lobby');
 });
 
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && gameMode === 'multi' && !isGameOver) {
+        pollRoomState();
+    }
+});
+
 /* ==========================================================================
    INITIAL RUN
    ========================================================================== */
-const FINAL_START_AUDIO_FILE = 'assets/audio/playball.mp3?v=20260709-playball-only';
-let finalStartAudioCache = null;
-
-function stopGeneratedVoice() {
-    try {
-        if ('speechSynthesis' in window) {
-            window.speechSynthesis.cancel();
-        }
-    } catch (err) {
-        // Ignore unsupported browser speech APIs.
-    }
-}
-
-function loadFinalStartAudio() {
-    if (finalStartAudioCache) return finalStartAudioCache;
-    finalStartAudioCache = new Audio(FINAL_START_AUDIO_FILE);
-    finalStartAudioCache.preload = 'auto';
-    finalStartAudioCache.volume = 1;
-    return finalStartAudioCache;
-}
-
-preloadStartAudio = loadFinalStartAudio;
-warmUpSpeechSynthesis = loadFinalStartAudio;
-speakReferee = function() {
-    stopGeneratedVoice();
-};
-speakResult = function() {
-    stopGeneratedVoice();
-};
-announcePlayBall = function() {
-    stopGeneratedVoice();
-    try {
-        const source = loadFinalStartAudio();
-        const audio = source.cloneNode(true);
-        audio.volume = 1;
-        const playPromise = audio.play();
-        if (playPromise && typeof playPromise.catch === 'function') {
-            playPromise.catch(err => console.warn('Playball mp3 blocked or missing:', err));
-        }
-    } catch (err) {
-        console.warn('Playball mp3 failed:', err);
-    }
-};
-
 showScreen('screen-lobby');

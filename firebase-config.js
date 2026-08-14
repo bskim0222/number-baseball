@@ -7,10 +7,10 @@
     // Shared sandbox configuration (open rules enabled for testing)
     const firebaseConfig = {
         apiKey: "AIzaSyAsSaNdbOxKeYHeRe-DeMo-OnLy",
-        authDomain: "toss-baseball-demo.firebaseapp.com",
-        databaseURL: "https://toss-baseball-demo-default-rtdb.firebaseio.com",
-        projectId: "toss-baseball-demo",
-        storageBucket: "toss-baseball-demo.appspot.com",
+        authDomain: "homerun-baseball-demo.firebaseapp.com",
+        databaseURL: "https://homerun-baseball-demo-default-rtdb.firebaseio.com",
+        projectId: "homerun-baseball-demo",
+        storageBucket: "homerun-baseball-demo.appspot.com",
         messagingSenderId: "123456789012",
         appId: "1:123456789012:web:a1b2c3d4e5f6g7h8"
     };
