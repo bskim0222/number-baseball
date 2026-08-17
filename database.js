@@ -99,11 +99,7 @@ class MemoryStore {
     }
 
     async deletePlayer(id) {
-        const player = this.players.get(id);
-        if (player) {
-            player.name = '탈퇴한 사용자';
-            player.deleted = true;
-        }
+        this.players.delete(id);
         this.stats.delete(id);
     }
 
@@ -308,12 +304,10 @@ class PostgresStore {
         const client = await this.pool.connect();
         try {
             await client.query('begin');
-            await client.query(
-                `update hb_players set nickname = '탈퇴한 사용자', deleted_at = now(), updated_at = now()
-                 where id = $1`,
-                [id]
-            );
+            await client.query('delete from hb_matches where winner_id = $1 or loser_id = $1', [id]);
+            await client.query('delete from hb_record_resets where player_id = $1', [id]);
             await client.query('delete from hb_player_season_stats where player_id = $1', [id]);
+            await client.query('delete from hb_players where id = $1', [id]);
             await client.query('commit');
         } catch (error) {
             await client.query('rollback');

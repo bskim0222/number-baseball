@@ -46,6 +46,15 @@ test('rankings use wins, win rate, and fewer losses without a score', async () =
     assert.equal(rankings.some(player => Object.hasOwn(player, 'rating')), false);
 });
 
+test('deleting an anonymous player removes the profile and season record', async () => {
+    const store = new MemoryStore();
+    await store.ensurePlayer('delete-me', '삭제테스트');
+    assert.equal((await store.getPlayer('delete-me')).name, '삭제테스트');
+    await store.deletePlayer('delete-me');
+    assert.equal(await store.getPlayer('delete-me'), null);
+    assert.equal((await store.listRankings()).some(player => player.id === 'delete-me'), false);
+});
+
 async function request(route, options = {}, userId = HOST_ID) {
     const response = await fetch(`${baseUrl}${route}`, {
         ...options,
@@ -74,6 +83,23 @@ test.before(async () => {
 
 test.after(async () => {
     await new Promise(resolve => server.close(resolve));
+});
+
+test('privacy and account deletion pages are publicly available without legacy Firebase', async () => {
+    const privacyResponse = await fetch(`${baseUrl}/privacy.html`);
+    const privacyText = await privacyResponse.text();
+    assert.equal(privacyResponse.ok, true);
+    assert.match(privacyText, /ask\.homerungame@gmail\.com/);
+
+    const deletionResponse = await fetch(`${baseUrl}/account-deletion.html`);
+    const deletionText = await deletionResponse.text();
+    assert.equal(deletionResponse.ok, true);
+    assert.match(deletionText, /이메일로 계정 삭제 요청/);
+
+    const indexResponse = await fetch(`${baseUrl}/index.html`);
+    const indexText = await indexResponse.text();
+    assert.equal(indexResponse.ok, true);
+    assert.doesNotMatch(indexText, /firebase|gstatic\.com\/firebase/i);
 });
 
 test('authenticated match records both players exactly once', async () => {

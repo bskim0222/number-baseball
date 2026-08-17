@@ -93,6 +93,7 @@ const joinModal = document.getElementById('join-modal');
 const accountModal = document.getElementById('account-modal');
 const accountNicknameInput = document.getElementById('account-nickname-input');
 const accountRecordValue = document.getElementById('account-record-value');
+const accountIdValue = document.getElementById('account-id-value');
 const messageModal = document.getElementById('message-modal');
 const messageModalTitle = document.getElementById('message-modal-title');
 const messageModalText = document.getElementById('message-modal-text');
@@ -512,6 +513,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (profileBar) {
         profileBar.addEventListener('click', () => {
             if (accountNicknameInput) accountNicknameInput.value = myPlayer.name || '';
+            if (accountIdValue) accountIdValue.textContent = myPlayer.id || '확인할 수 없음';
             if (accountRecordValue) {
                 accountRecordValue.textContent = `${myPlayer.wins}승 ${myPlayer.losses}패 · 승률 ${myPlayer.rate}%`;
             }
@@ -894,6 +896,25 @@ safeAddListener('btn-close-join', 'click', () => closeModal(joinModal));
 
 safeAddListener('btn-close-account', 'click', () => closeModal(accountModal));
 
+safeAddListener('btn-copy-account-id', 'click', () => {
+    const accountId = String(myPlayer.id || '');
+    if (!accountId || accountId === 'LOCAL-GUEST' || accountId === 'AUTH-PENDING') {
+        showToast('계정 식별번호를 아직 불러오지 못했습니다.', 'warning');
+        return;
+    }
+    const copyPromise = navigator.clipboard && navigator.clipboard.writeText
+        ? navigator.clipboard.writeText(accountId)
+        : Promise.reject(new Error('clipboard unavailable'));
+    copyPromise.catch(() => {
+        const field = document.createElement('textarea');
+        field.value = accountId;
+        document.body.appendChild(field);
+        field.select();
+        document.execCommand('copy');
+        field.remove();
+    }).then(() => showToast('계정 식별번호를 복사했습니다.', 'success'));
+});
+
 safeAddListener('btn-save-account-name', 'click', () => {
     const nextName = accountNicknameInput ? accountNicknameInput.value.trim() : '';
     if (nextName.length < 2) {
@@ -938,7 +959,7 @@ safeAddListener('btn-reset-record', 'click', () => {
 safeAddListener('btn-delete-account', 'click', () => {
     showConfirmDialog({
         title: '계정과 기록 삭제',
-        message: '닉네임과 모든 시즌 전적을 삭제합니다. 이 작업은 되돌릴 수 없습니다.',
+        message: '익명 계정, 닉네임, 모든 시즌 전적과 경기 연결 기록을 삭제합니다. 이 작업은 되돌릴 수 없습니다.',
         confirmText: '완전 삭제',
         icon: 'fa-user-xmark'
     }).then(confirmed => {

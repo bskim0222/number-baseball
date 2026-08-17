@@ -139,6 +139,10 @@
 
             <footer class="lobby-footer">
                 <p><i class="fa-solid fa-shield-halved"></i> 안전한 닉네임으로 플레이 중</p>
+                <div class="lobby-policy-links">
+                    <a href="privacy.html">개인정보 처리방침</a>
+                    <a href="account-deletion.html">계정 삭제 안내</a>
+                </div>
             </footer>
         </main>
 
@@ -488,6 +492,19 @@
                 <span>현재 시즌 전적</span>
                 <strong id="account-record-value">0승 0패 · 승률 0%</strong>
             </div>
+            <div class="account-id-card">
+                <span>익명 계정 식별번호</span>
+                <div>
+                    <code id="account-id-value">불러오는 중</code>
+                    <button id="btn-copy-account-id" type="button" aria-label="계정 식별번호 복사" title="계정 식별번호 복사">
+                        <i class="fa-solid fa-copy"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="account-policy-links">
+                <a href="privacy.html"><i class="fa-solid fa-shield-halved"></i> 개인정보 처리방침</a>
+                <a href="account-deletion.html"><i class="fa-solid fa-user-xmark"></i> 외부 삭제 요청</a>
+            </div>
             <div class="account-danger-actions">
                 <button id="btn-reset-record" class="account-action-btn warning">
                     <i class="fa-solid fa-rotate-left"></i> 전적 초기화
@@ -515,17 +532,12 @@
     <div id="app-toast-stack" class="app-toast-stack" aria-live="polite" aria-atomic="true"></div>
     </div> <!-- end app-wrapper -->
  
-    <!-- Firebase Compat CDN -->
-    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
-    
     <!-- Platform bridge & config -->
     <script src="api-config.js"></script>
     <script src="auth-client.js"></script>
     <script src="game-bridge.js"></script>
-    <script src="firebase-config.js"></script>
 
     <!-- Main Game Logic -->
-    <script src="app.js?v=20260814-v6-record-ranking"></script>
+    <script src="app.js?v=20260817-v8-privacy"></script>
 </body>
 </html>

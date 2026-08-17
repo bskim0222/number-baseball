@@ -296,6 +296,20 @@ body {
     margin-right: 4px;
 }
 
+.lobby-policy-links {
+    display: flex;
+    justify-content: center;
+    gap: 14px;
+    margin-top: 8px;
+}
+
+.lobby-policy-links a {
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
 /* ==========================================================================
    SUBPAGE HEADER (공통 서브헤더)
    ========================================================================== */
@@ -1855,6 +1869,65 @@ body {
     font-family: var(--font-numeric);
     font-size: 0.92rem;
     white-space: nowrap;
+}
+
+.account-id-card {
+    margin-top: 10px;
+    padding: 12px 14px;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.025);
+}
+
+.account-id-card > span {
+    display: block;
+    margin-bottom: 7px;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+}
+
+.account-id-card > div {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 32px;
+    align-items: center;
+    gap: 8px;
+}
+
+.account-id-card code {
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-family: var(--font-numeric);
+    font-size: 0.68rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.account-id-card button {
+    width: 32px;
+    height: 32px;
+    display: grid;
+    place-items: center;
+    border: 1px solid rgba(0,210,255,0.28);
+    border-radius: 6px;
+    background: rgba(0,210,255,0.08);
+    color: var(--neon-blue);
+}
+
+.account-policy-links {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.account-policy-links a {
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    text-decoration: none;
+}
+
+.account-policy-links a:hover {
+    color: var(--neon-blue);
 }
 
 .account-danger-actions {
