@@ -1747,6 +1747,19 @@ function applyCompletedMatchStats(isWin, serverStats) {
     syncPlayerStats();
 }
 
+function notifyNativeAdAfterNormalResult(reason) {
+    if (reason !== 'win') return;
+    if (!window.AndroidAds || typeof window.AndroidAds.onNormalGameCompleted !== 'function') return;
+
+    window.setTimeout(() => {
+        try {
+            window.AndroidAds.onNormalGameCompleted(reason);
+        } catch (err) {
+            console.warn('Android ad bridge unavailable:', err);
+        }
+    }, 1800);
+}
+
 function endGame(isWin, attemptsUsed, isOpponentWin = false, reason = "win", serverStats = null) {
     try {
         isGameOver = true;
@@ -1813,6 +1826,7 @@ function endGame(isWin, attemptsUsed, isOpponentWin = false, reason = "win", ser
 
         setTimeout(() => {
             openModal(resultModal);
+            notifyNativeAdAfterNormalResult(reason);
         }, 600);
     } catch (err) {
         console.error("endGame error:", err);
