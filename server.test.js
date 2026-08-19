@@ -145,6 +145,80 @@ test('authenticated match records both players exactly once', async () => {
     assert.equal(rankings.some(player => player.name === '테스트원정' && player.wins === 1), true);
 });
 
+test('private rooms stay hidden, restore for the host, and trigger a push event', async () => {
+    const token = 'test-fcm-token-12345678901234567890';
+    await api('/api/push/register', {
+        method: 'POST', body: JSON.stringify({ token, name: '테스트홈' })
+    }, HOST_ID);
+
+    const sent = [];
+    const originalSend = _internals.pushService.sendRoomJoined;
+    _internals.pushService.sendRoomJoined = async (userId, payload) => {
+        sent.push({ userId, payload });
+        return { sent: 1 };
+    };
+
+    try {
+        const room = await api('/api/create', {
+            method: 'POST',
+            body: JSON.stringify({ hostName: '테스트홈', roomTitle: '친구만 들어와', visibility: 'private' })
+        }, HOST_ID);
+        assert.equal(room.code.length, 6);
+        assert.equal(room.roomTitle, '친구만 들어와');
+        assert.equal(room.visibility, 'private');
+
+        const publicRooms = await api('/api/rooms', {}, HOST_ID);
+        assert.equal(publicRooms.some(item => item.code === room.code), false);
+
+        await api('/api/join', {
+            method: 'POST', body: JSON.stringify({ room: room.code, guestName: '테스트원정' })
+        }, GUEST_ID);
+        await new Promise(resolve => setImmediate(resolve));
+
+        assert.deepEqual(sent, [{
+            userId: HOST_ID,
+            payload: {
+                roomCode: room.code,
+                roomTitle: '친구만 들어와',
+                guestName: '테스트원정'
+            }
+        }]);
+
+        const active = await api('/api/me/active-room', {}, HOST_ID);
+        assert.equal(active.role, 'host');
+        assert.equal(active.room.code, room.code);
+        assert.equal(active.room.status, 'setup');
+    } finally {
+        _internals.pushService.sendRoomJoined = originalSend;
+    }
+});
+
+test('public rooms expose their custom title and can replace an unfinished waiting room', async () => {
+    const room = await api('/api/create', {
+        method: 'POST',
+        body: JSON.stringify({ hostName: '테스트홈', roomTitle: '1234567890123456789012345', visibility: 'public' })
+    }, HOST_ID);
+    assert.equal(room.code.length, 4);
+    assert.equal(room.roomTitle.length, 20);
+    const publicRooms = await api('/api/rooms', {}, GUEST_ID);
+    const listed = publicRooms.find(item => item.code === room.code);
+    assert.equal(listed.roomTitle, room.roomTitle);
+});
+
+test('an expired waiting room cannot be joined', async () => {
+    const room = await api('/api/create', {
+        method: 'POST',
+        body: JSON.stringify({ hostName: '만료테스트', visibility: 'private' })
+    }, OUTSIDER_ID);
+    _internals.rooms[room.code].expiresAt = Date.now() - 1;
+
+    const { response } = await request('/api/join', {
+        method: 'POST', body: JSON.stringify({ room: room.code, guestName: '테스트원정' })
+    }, GUEST_ID);
+    assert.equal(response.status, 404);
+    assert.equal(_internals.rooms[room.code], undefined);
+});
+
 test('a player cannot act as the opponent role', async () => {
     const room = Object.values(_internals.rooms).find(item => item.host.id === HOST_ID && item.guest);
     const { response, body } = await request(`/api/poll?room=${room.code}&role=guest`, {}, HOST_ID);
@@ -181,22 +255,36 @@ test('starting a new season preserves accounts and begins fresh rankings', async
     assert.deepEqual([profile.player.wins, profile.player.losses], [0, 0]);
 });
 
-test('disconnect requires an active opponent and the full grace period', async () => {
+test('disconnect forfeits only after a match has started and the grace period elapsed', async () => {
     const { HEARTBEAT_STALE_MS, DISCONNECT_GRACE_MS } = _internals.constants;
     const now = 1_000_000;
     const room = {
-        code: '9999', status: 'setup',
+        code: '9999', status: 'playing',
         host: { id: HOST_ID, name: 'A', lastActive: now - HEARTBEAT_STALE_MS - 1, disconnectSince: null },
         guest: { id: GUEST_ID, name: 'B', lastActive: now, disconnectSince: null },
         startedAt: null, statsRecorded: false, winner: '', reason: ''
     };
     await _internals.monitorConnections(room, now);
-    assert.equal(room.status, 'setup');
+    assert.equal(room.status, 'playing');
     assert.equal(room.host.disconnectSince, now);
     room.guest.lastActive = now + DISCONNECT_GRACE_MS;
     await _internals.monitorConnections(room, now + DISCONNECT_GRACE_MS);
     assert.equal(room.status, 'finished');
     assert.equal(room.winner, 'guest');
+});
+
+test('closing a waiting room does not cause a setup-stage forfeit', async () => {
+    const now = 1_500_000;
+    const room = {
+        code: '7777', status: 'setup',
+        host: { id: HOST_ID, name: 'A', lastActive: 0, disconnectSince: null },
+        guest: { id: GUEST_ID, name: 'B', lastActive: now, disconnectSince: null },
+        startedAt: null, statsRecorded: false, winner: '', reason: ''
+    };
+    await _internals.monitorConnections(room, now);
+    assert.equal(room.status, 'setup');
+    assert.equal(room.winner, '');
+    assert.equal(room.host.disconnectSince, null);
 });
 
 test('a shared outage does not award a random forfeit win', async () => {

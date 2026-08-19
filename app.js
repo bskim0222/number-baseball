@@ -7,6 +7,7 @@ const DIGIT_COUNT = 4;
 const MAX_ATTEMPTS = 10;
 const STORAGE_KEY_BEST = 'number_baseball_best_4digit';
 const STORAGE_KEY_STATS = 'homerun_baseball_stats_v2';
+const STORAGE_KEY_ACTIVE_ROOM = 'homerun_baseball_active_room_v1';
 const TURN_TIMEOUT_MS = 60_000;
 const TIMER_WARNING_SECONDS = 20;
 
@@ -44,6 +45,9 @@ let opponentPlayer = null;
 
 // Room Info
 let currentRoomCode = '';
+let currentRoomTitle = '';
+let currentRoomVisibility = 'public';
+let selectedRoomVisibility = 'public';
 let opponentName = '상대 대기 중...';
 let myRole = ''; // 'host' or 'guest'
 let pollInterval = null;
@@ -89,7 +93,10 @@ const btnSimulateOpp = document.getElementById('btn-simulate-opp');
 // Modals
 const rulesModal = document.getElementById('rules-modal');
 const resultModal = document.getElementById('result-modal');
+const createRoomModal = document.getElementById('create-room-modal');
 const joinModal = document.getElementById('join-modal');
+const createRoomTitleInput = document.getElementById('create-room-title');
+const roomVisibilityHelp = document.getElementById('room-visibility-help');
 const accountModal = document.getElementById('account-modal');
 const accountNicknameInput = document.getElementById('account-nickname-input');
 const accountRecordValue = document.getElementById('account-record-value');
@@ -319,7 +326,66 @@ function resetRealtimeRenderCache() {
     locallyRecordedRoomCode = '';
 }
 
+function rememberActiveRoom(room, role) {
+    if (!room || !room.code || !role) return;
+    try {
+        localStorage.setItem(STORAGE_KEY_ACTIVE_ROOM, JSON.stringify({
+            code: String(room.code),
+            role,
+            roomTitle: room.roomTitle || '',
+            visibility: room.visibility || 'public',
+            savedAt: Date.now()
+        }));
+    } catch (error) {
+        console.warn('Could not save active room:', error);
+    }
+}
+
+function clearActiveRoom() {
+    try {
+        localStorage.removeItem(STORAGE_KEY_ACTIVE_ROOM);
+    } catch (error) {}
+}
+
+function updateWaitingRoomMeta(room) {
+    currentRoomTitle = room.roomTitle || `${room.host && room.host.name ? room.host.name : '대전'}님의 방`;
+    currentRoomVisibility = room.visibility === 'private' ? 'private' : 'public';
+
+    const title = document.getElementById('waiting-room-title');
+    const badge = document.getElementById('room-visibility-badge');
+    if (title) title.textContent = currentRoomTitle;
+    if (badge) {
+        badge.textContent = currentRoomVisibility === 'private' ? '비공개방' : '공개방';
+        badge.classList.toggle('private', currentRoomVisibility === 'private');
+        badge.classList.toggle('public', currentRoomVisibility !== 'private');
+    }
+}
+
+function registerPushToken(token) {
+    const normalized = String(token || '').trim();
+    if (!normalized) return Promise.resolve(false);
+    return apiFetch('/api/push/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: normalized, name: myPlayer.name })
+    })
+        .then(readApiResponse)
+        .then(() => true)
+        .catch(error => {
+            console.warn('Push token registration failed:', error);
+            return false;
+        });
+}
+
+window.onNativePushToken = token => registerPushToken(token);
+window.onNativeRoomInvite = () => restoreActiveRoom(true);
+
 function requestRoomNotificationPermission() {
+    if (GameBridge && typeof GameBridge.enableRoomNotifications === 'function') {
+        GameBridge.enableRoomNotifications()
+            .then(token => registerPushToken(token))
+            .catch(error => console.warn('Native room notifications unavailable:', error));
+    }
     try {
         if ('Notification' in window && Notification.permission === 'default') {
             Notification.requestPermission().catch(() => {});
@@ -413,18 +479,22 @@ document.addEventListener('DOMContentLoaded', () => {
         updateMyNameDisplays();
         updateLobbyStatsUI();
         
-        // Restore the authoritative record first, then calculate the leaderboard.
-        syncPlayerStats().then(() => initRankings());
-
         // 1.1 Check if room query parameter exists for Auto-Join
         const urlParams = new URLSearchParams(window.location.search);
         const urlRoomCode = urlParams.get('room');
-        if (urlRoomCode && urlRoomCode.length === 4) {
+        const screenshotParam = urlParams.get('screenshot');
+
+        // Restore the authoritative record first, then recover an active room.
+        syncPlayerStats().then(() => {
+            initRankings();
+            if (!urlRoomCode && !screenshotParam) restoreActiveRoom(false);
+        });
+
+        if (urlRoomCode && [4, 6].includes(urlRoomCode.length)) {
             autoJoinRoomFromUrl(urlRoomCode);
         }
 
         // 1.2 Check if screenshot query parameter exists for taking app store screenshots
-        const screenshotParam = urlParams.get('screenshot');
         if (screenshotParam) {
             window.isAutomatedTest = true; // bypass confirmation dialogs
             if (screenshotParam === 'lobby') {
@@ -543,6 +613,8 @@ function autoJoinRoomFromUrl(inputCode) {
         isGameOver = false;
         currentRoomCode = inputCode;
         document.getElementById('room-code-value').textContent = currentRoomCode;
+        updateWaitingRoomMeta(room);
+        rememberActiveRoom(room, myRole);
 
         // Setup waiting room Guest UI
         document.getElementById('opponent-name').textContent = room.host.name;
@@ -590,6 +662,8 @@ function refreshPublicRooms() {
 
         container.innerHTML = '';
         rooms.forEach(room => {
+            const escapedTitle = escapeHtml(room.roomTitle || `${room.hostName}님의 방`);
+            const escapedCode = escapeHtml(room.code);
             const item = document.createElement('div');
             item.style.cssText = `
                 display: flex;
@@ -603,10 +677,10 @@ function refreshPublicRooms() {
             `;
             item.innerHTML = `
                 <div>
-                    <span style="font-weight: 600; color: #fff;">${room.hostName} 님의 방</span>
-                    <span style="display: block; font-size: 0.75rem; color: var(--neon-blue); font-family: var(--font-numeric); margin-top: 2px;"># ${room.code}</span>
+                    <span style="font-weight: 600; color: #fff;">${escapedTitle}</span>
+                    <span style="display: block; font-size: 0.75rem; color: var(--neon-blue); font-family: var(--font-numeric); margin-top: 2px;"># ${escapedCode}</span>
                 </div>
-                <button onclick="joinPublicRoom('${room.code}')" style="
+                <button type="button" style="
                     padding: 6px 12px;
                     background: var(--neon-blue);
                     color: #000;
@@ -618,6 +692,7 @@ function refreshPublicRooms() {
                     box-shadow: 0 0 10px rgba(45,136,255,0.3);
                 ">입장</button>
             `;
+            item.querySelector('button').addEventListener('click', () => joinPublicRoom(room.code));
             container.appendChild(item);
         });
     })
@@ -638,6 +713,86 @@ function joinPublicRoom(code) {
     }).then(confirmed => {
         if (confirmed) autoJoinRoomFromUrl(code);
     });
+}
+
+function escapeHtml(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, character => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    })[character]);
+}
+
+function applyRestoredRoom(room, role) {
+    gameMode = 'multi';
+    myRole = role;
+    isGameOver = false;
+    currentRoomCode = room.code;
+    document.getElementById('room-code-value').textContent = currentRoomCode;
+    updateWaitingRoomMeta(room);
+    rememberActiveRoom(room, role);
+    updateMyNameDisplays();
+
+    const opponent = role === 'host' ? room.guest : room.host;
+    const opponentNameEl = document.getElementById('opponent-name');
+    const opponentAvatarEl = document.getElementById('opponent-avatar');
+    const opponentCardEl = document.getElementById('opponent-card');
+    const opponentStatusEl = document.getElementById('opponent-status');
+
+    if (opponent) {
+        opponentNameEl.textContent = opponent.name;
+        opponentAvatarEl.className = 'fa-solid fa-circle-user';
+        opponentCardEl.className = 'player-card active-player';
+        opponentStatusEl.textContent = opponent.status === 'ready' ? '준비 완료' : '설정 중...';
+        opponentStatusEl.className = 'player-status ready';
+    } else {
+        opponentNameEl.textContent = '상대 대기 중...';
+        opponentAvatarEl.className = 'fa-solid fa-circle-question';
+        opponentCardEl.className = 'player-card waiting-player';
+        opponentStatusEl.textContent = '초대 대기';
+        opponentStatusEl.className = 'player-status';
+    }
+
+    mySecretInput = room.secrets && Array.isArray(room.secrets[role])
+        ? room.secrets[role].slice(0, DIGIT_COUNT)
+        : [];
+    updateSetupSlots();
+    resetRealtimeRenderCache();
+    if (pollInterval) clearInterval(pollInterval);
+    pollInterval = setInterval(pollRoomState, 800);
+
+    if (room.status === 'playing') startMultiGame(room);
+    else showScreen('screen-waiting');
+}
+
+function restoreActiveRoom(fromNotification) {
+    if (window.isAutomatedTest || gameMode === 'solo' && currentScreen === 'screen-game') {
+        return Promise.resolve(false);
+    }
+    return apiFetch('/api/me/active-room')
+        .then(readApiResponse)
+        .then(response => {
+            if (!response.room) {
+                clearActiveRoom();
+                return false;
+            }
+            applyRestoredRoom(response.room, response.role);
+            if (response.role === 'host') requestRoomNotificationPermission();
+            showToast(
+                fromNotification && response.room.guest
+                    ? `${response.room.guest.name}님이 입장한 방으로 돌아왔습니다.`
+                    : '진행 중인 대전방으로 돌아왔습니다.',
+                'success',
+                3600
+            );
+            return true;
+        })
+        .catch(error => {
+            console.warn('Active room restore failed:', error);
+            return false;
+        });
 }
 window.joinPublicRoom = joinPublicRoom;
 
@@ -770,6 +925,7 @@ function showScreen(screenId) {
     // Reset overlays
     closeModal(rulesModal);
     closeModal(resultModal);
+    closeModal(createRoomModal);
     closeModal(joinModal);
     if (messageModal && !messageModal.classList.contains('hidden')) {
         closeMessageDialog(false);
@@ -797,6 +953,15 @@ document.querySelectorAll('.back-btn').forEach(btn => {
         if (currentScreen === 'screen-waiting' && pollInterval) {
             clearInterval(pollInterval);
             pollInterval = null;
+            if (currentRoomCode && currentRoomCode !== 'SAND') {
+                apiFetch('/api/leave', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ room: currentRoomCode, role: myRole })
+                }).catch(() => {});
+            }
+            clearActiveRoom();
+            currentRoomCode = '';
         }
         showScreen(target);
     });
@@ -812,12 +977,36 @@ safeAddListener('btn-menu-solo', 'click', () => {
     startSoloGame();
 });
 
+function setRoomVisibility(visibility) {
+    selectedRoomVisibility = visibility === 'private' ? 'private' : 'public';
+    document.querySelectorAll('.visibility-option').forEach(button => {
+        button.classList.toggle('active', button.dataset.visibility === selectedRoomVisibility);
+    });
+    if (roomVisibilityHelp) {
+        roomVisibilityHelp.textContent = selectedRoomVisibility === 'private'
+            ? '공개방 목록에는 나타나지 않습니다. 생성 후 6자리 초대 코드를 공유하세요.'
+            : '공개방 목록에 표시되어 누구나 참가할 수 있습니다.';
+    }
+}
+
 safeAddListener('btn-menu-create', 'click', () => {
+    setRoomVisibility('public');
+    if (createRoomTitleInput) createRoomTitleInput.value = '';
+    openModal(createRoomModal);
+    if (createRoomTitleInput) window.setTimeout(() => createRoomTitleInput.focus(), 120);
+});
+
+safeAddListener('btn-room-public', 'click', () => setRoomVisibility('public'));
+safeAddListener('btn-room-private', 'click', () => setRoomVisibility('private'));
+safeAddListener('btn-close-create', 'click', () => closeModal(createRoomModal));
+
+safeAddListener('btn-submit-create', 'click', () => {
     gameMode = 'multi';
     myRole = 'host';
     isGameOver = false;
     requestRoomNotificationPermission();
     updateMyNameDisplays();
+    closeModal(createRoomModal);
 
     // Setup host UI
     document.getElementById('opponent-name').textContent = '상대 대기 중...';
@@ -847,7 +1036,11 @@ safeAddListener('btn-menu-create', 'click', () => {
     }
 
     // Call REST server to generate room
-    const data = { hostName: myPlayer.name };
+    const data = {
+        hostName: myPlayer.name,
+        roomTitle: createRoomTitleInput ? createRoomTitleInput.value.trim() : '',
+        visibility: selectedRoomVisibility
+    };
     apiFetch('/api/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -857,6 +1050,8 @@ safeAddListener('btn-menu-create', 'click', () => {
     .then(room => {
         currentRoomCode = room.code;
         document.getElementById('room-code-value').textContent = currentRoomCode;
+        updateWaitingRoomMeta(room);
+        rememberActiveRoom(room, myRole);
 
         // Start polling room state
         resetRealtimeRenderCache();
@@ -980,8 +1175,8 @@ safeAddListener('btn-delete-account', 'click', () => {
 
 safeAddListener('btn-submit-join', 'click', () => {
     const inputCode = document.getElementById('join-room-input').value.trim();
-    if (inputCode.length !== 4) {
-        showToast('올바른 4자리 방 번호를 입력해 주세요.', 'warning');
+    if (!/^\d{4}(\d{2})?$/.test(inputCode)) {
+        showToast('4자리 공개방 번호 또는 6자리 초대 코드를 입력해 주세요.', 'warning');
         return;
     }
 
@@ -1002,6 +1197,8 @@ safeAddListener('btn-submit-join', 'click', () => {
         isGameOver = false;
         currentRoomCode = inputCode;
         document.getElementById('room-code-value').textContent = currentRoomCode;
+        updateWaitingRoomMeta(room);
+        rememberActiveRoom(room, myRole);
 
         // Setup waiting room Guest UI
         document.getElementById('opponent-name').textContent = room.host.name;
@@ -1034,9 +1231,9 @@ safeAddListener('btn-menu-rankings', 'click', () => {
 
 // Copy room code to clipboard
 safeAddListener('btn-copy-code', 'click', () => {
-    GameBridge.shareRoomCode(currentRoomCode).then(() => {
+    GameBridge.shareRoomCode(currentRoomCode, currentRoomTitle, currentRoomVisibility).then(() => {
         GameBridge.vibrate('light');
-        showToast('방 초대 메시지를 복사했습니다.', 'success');
+        showToast('초대 메시지를 공유했습니다.', 'success');
     });
 });
 
@@ -1153,6 +1350,7 @@ async function pollRoomState() {
         if (room.status === 'finished') {
             clearInterval(pollInterval);
             pollInterval = null;
+            clearActiveRoom();
             const isWin = room.winner === myRole;
             if (room.secrets) {
                 const oppRole = myRole === 'host' ? 'guest' : 'host';
@@ -1175,6 +1373,7 @@ async function pollRoomState() {
             clearInterval(pollInterval);
             pollInterval = null;
             isGameOver = true;
+            clearActiveRoom();
             showScreen('screen-lobby');
             showToast('대전방 연결이 종료되었습니다. 새 방에서 다시 시작해 주세요.', 'error', 5000);
         }
@@ -1980,6 +2179,7 @@ safeAddListener('btn-info', 'click', () => openModal(rulesModal));
 safeAddListener('btn-close-rules', 'click', () => closeModal(rulesModal));
 window.addEventListener('click', (e) => {
     if (e.target === rulesModal) closeModal(rulesModal);
+    if (e.target === createRoomModal) closeModal(createRoomModal);
     if (e.target === joinModal) closeModal(joinModal);
     if (e.target === accountModal) closeModal(accountModal);
 });
@@ -1987,6 +2187,14 @@ window.addEventListener('click', (e) => {
 // Exit game / Restart game to Lobby
 safeAddListener('btn-exit-game', 'click', () => {
     isGameOver = true;
+    if (gameMode === 'multi' && currentRoomCode && currentRoomCode !== 'SAND') {
+        apiFetch('/api/leave', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ room: currentRoomCode, role: myRole })
+        }).catch(() => {});
+    }
+    clearActiveRoom();
     // Stop polling
     if (pollInterval) {
         clearInterval(pollInterval);

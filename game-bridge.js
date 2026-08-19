@@ -5,9 +5,11 @@
 
 (function () {
     const STORAGE_KEY_USER = 'homerun_baseball_user_profile';
+    let pushTokenResolver = null;
+    let pushTokenTimer = null;
 
     const GameBridge = {
-        isNative: false,
+        isNative: Boolean(window.AndroidGame),
 
         getProfile: function () {
             return window.AuthClient.ensureSession().then(session => new Promise((resolve) => {
@@ -68,9 +70,44 @@
             }
         },
 
-        shareRoomCode: function (roomCode) {
-            const shareUrl = `${window.location.origin}${window.location.pathname}?room=${roomCode}`;
-            const message = `[홈런 숫자야구] 대전 방이 열렸습니다!\n방 코드: ${roomCode}\n같이 치러 가기: ${shareUrl}`;
+        enableRoomNotifications: function () {
+            if (!window.AndroidGame || typeof window.AndroidGame.requestRoomNotifications !== 'function') {
+                return Promise.resolve('');
+            }
+            return new Promise(resolve => {
+                pushTokenResolver = resolve;
+                if (pushTokenTimer) window.clearTimeout(pushTokenTimer);
+                pushTokenTimer = window.setTimeout(() => {
+                    pushTokenResolver = null;
+                    resolve('');
+                }, 10000);
+                window.AndroidGame.requestRoomNotifications();
+            });
+        },
+
+        receivePushToken: function (token) {
+            const normalized = String(token || '');
+            if (pushTokenTimer) window.clearTimeout(pushTokenTimer);
+            pushTokenTimer = null;
+            if (pushTokenResolver) {
+                const resolve = pushTokenResolver;
+                pushTokenResolver = null;
+                resolve(normalized);
+            }
+        },
+
+        shareRoomCode: function (roomCode, roomTitle, visibility) {
+            const title = String(roomTitle || '홈런 숫자야구 대전방');
+            const isPrivate = visibility === 'private';
+            if (window.AndroidGame && typeof window.AndroidGame.shareRoomInvitation === 'function') {
+                window.AndroidGame.shareRoomInvitation(String(roomCode), title, isPrivate);
+                return Promise.resolve(true);
+            }
+
+            const baseUrl = String(window.HOMERUN_API_BASE || window.location.origin || '').replace(/\/$/, '');
+            const shareUrl = `${baseUrl}/?room=${encodeURIComponent(roomCode)}`;
+            const roomType = isPrivate ? '비공개방 초대 코드' : '공개방 번호';
+            const message = `[홈런 숫자야구] ${title}\n${roomType}: ${roomCode}\n참가 링크: ${shareUrl}`;
 
             return new Promise((resolve) => {
                 navigator.clipboard.writeText(message).then(() => {

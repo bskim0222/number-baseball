@@ -26,12 +26,20 @@ function publicPlayer(record) {
     };
 }
 
+function roomSnapshot(room) {
+    if (!room) return null;
+    const { statsPromise, ...state } = room;
+    return JSON.parse(JSON.stringify(state));
+}
+
 class MemoryStore {
     constructor() {
         this.players = new Map();
         this.stats = new Map();
         this.matches = new Set();
         this.resets = [];
+        this.pushTokens = new Map();
+        this.activeRooms = new Map();
         this.season = { id: 1, name: '시즌 1' };
     }
 
@@ -101,6 +109,67 @@ class MemoryStore {
     async deletePlayer(id) {
         this.players.delete(id);
         this.stats.delete(id);
+        this.pushTokens.delete(id);
+        for (const [code, room] of this.activeRooms.entries()) {
+            if (room.host.id === id || (room.guest && room.guest.id === id)) {
+                this.activeRooms.delete(code);
+            }
+        }
+    }
+
+    async savePushToken(userId, token, platform = 'android') {
+        const tokens = this.pushTokens.get(userId) || new Map();
+        tokens.set(token, { token, platform, updatedAt: Date.now() });
+        this.pushTokens.set(userId, tokens);
+    }
+
+    async getPushTokens(userId) {
+        return [...(this.pushTokens.get(userId) || new Map()).keys()];
+    }
+
+    async deletePushToken(token) {
+        for (const tokens of this.pushTokens.values()) tokens.delete(token);
+    }
+
+    async saveRoom(room) {
+        const state = roomSnapshot(room);
+        this.activeRooms.set(state.code, state);
+        return state;
+    }
+
+    async getRoom(code) {
+        const state = this.activeRooms.get(String(code));
+        if (!state) return null;
+        if (state.expiresAt && state.expiresAt <= Date.now()) {
+            this.activeRooms.delete(String(code));
+            return null;
+        }
+        return { ...roomSnapshot(state), statsPromise: null };
+    }
+
+    async deleteRoom(code) {
+        this.activeRooms.delete(String(code));
+    }
+
+    async findActiveRoom(userId) {
+        const active = [...this.activeRooms.values()]
+            .filter(room => room.expiresAt > Date.now())
+            .filter(room => ['waiting', 'setup', 'playing'].includes(room.status))
+            .filter(room => room.host.id === userId || (room.guest && room.guest.id === userId))
+            .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+        return active ? { ...roomSnapshot(active), statsPromise: null } : null;
+    }
+
+    async listWaitingRooms() {
+        return [...this.activeRooms.values()]
+            .filter(room => room.status === 'waiting' && room.visibility === 'public' && room.expiresAt > Date.now())
+            .sort((a, b) => b.createdAt - a.createdAt)
+            .map(room => ({
+                code: room.code,
+                roomTitle: room.roomTitle,
+                hostName: room.host.name,
+                expiresAt: room.expiresAt
+            }));
     }
 
     async startSeason(name) {
@@ -304,6 +373,8 @@ class PostgresStore {
         const client = await this.pool.connect();
         try {
             await client.query('begin');
+            await client.query('delete from hb_push_tokens where player_id = $1', [id]);
+            await client.query('delete from hb_active_rooms where host_id = $1 or guest_id = $1', [id]);
             await client.query('delete from hb_matches where winner_id = $1 or loser_id = $1', [id]);
             await client.query('delete from hb_record_resets where player_id = $1', [id]);
             await client.query('delete from hb_player_season_stats where player_id = $1', [id]);
@@ -315,6 +386,102 @@ class PostgresStore {
         } finally {
             client.release();
         }
+    }
+
+    async savePushToken(userId, token, platform = 'android') {
+        await this.pool.query(
+            `insert into hb_push_tokens (token, player_id, platform)
+             values ($1, $2, $3)
+             on conflict (token) do update set
+                player_id = excluded.player_id,
+                platform = excluded.platform,
+                updated_at = now()`,
+            [token, userId, platform]
+        );
+    }
+
+    async getPushTokens(userId) {
+        const result = await this.pool.query(
+            'select token from hb_push_tokens where player_id = $1 order by updated_at desc',
+            [userId]
+        );
+        return result.rows.map(row => row.token);
+    }
+
+    async deletePushToken(token) {
+        await this.pool.query('delete from hb_push_tokens where token = $1', [token]);
+    }
+
+    async saveRoom(room) {
+        const state = roomSnapshot(room);
+        await this.pool.query(
+            `insert into hb_active_rooms
+                (code, match_id, status, visibility, host_id, guest_id, state, expires_at, updated_at)
+             values ($1, $2, $3, $4, $5, $6, $7::jsonb, to_timestamp($8 / 1000.0), now())
+             on conflict (code) do update set
+                match_id = excluded.match_id,
+                status = excluded.status,
+                visibility = excluded.visibility,
+                host_id = excluded.host_id,
+                guest_id = excluded.guest_id,
+                state = excluded.state,
+                expires_at = excluded.expires_at,
+                updated_at = now()`,
+            [
+                state.code,
+                state.matchId,
+                state.status,
+                state.visibility,
+                state.host.id,
+                state.guest ? state.guest.id : null,
+                JSON.stringify(state),
+                state.expiresAt
+            ]
+        );
+        return state;
+    }
+
+    async getRoom(code) {
+        const result = await this.pool.query(
+            `select state from hb_active_rooms
+             where code = $1 and expires_at > now()`,
+            [String(code)]
+        );
+        const state = result.rows[0] && result.rows[0].state;
+        return state ? { ...state, statsPromise: null } : null;
+    }
+
+    async deleteRoom(code) {
+        await this.pool.query('delete from hb_active_rooms where code = $1', [String(code)]);
+    }
+
+    async findActiveRoom(userId) {
+        const result = await this.pool.query(
+            `select state from hb_active_rooms
+             where (host_id = $1 or guest_id = $1)
+               and status in ('waiting', 'setup', 'playing')
+               and expires_at > now()
+             order by updated_at desc limit 1`,
+            [userId]
+        );
+        const state = result.rows[0] && result.rows[0].state;
+        return state ? { ...state, statsPromise: null } : null;
+    }
+
+    async listWaitingRooms() {
+        const result = await this.pool.query(
+            `select code, state->>'roomTitle' as room_title, state->'host'->>'name' as host_name,
+                    extract(epoch from expires_at) * 1000 as expires_at
+             from hb_active_rooms
+             where status = 'waiting' and visibility = 'public' and expires_at > now()
+             order by updated_at desc`
+        );
+        return result.rows.map(row => ({
+            code: row.code,
+            roomTitle: row.room_title,
+            hostName: row.host_name,
+            expiresAt: Number(row.expires_at)
+        }));
     }
 
     async startSeason(name) {

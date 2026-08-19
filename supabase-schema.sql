@@ -50,17 +50,47 @@ create table if not exists hb_record_resets (
     created_at timestamptz not null default now()
 );
 
+create table if not exists hb_push_tokens (
+    token text primary key,
+    player_id uuid not null references hb_players(id) on delete cascade,
+    platform varchar(20) not null default 'android',
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+create index if not exists hb_push_tokens_player_idx on hb_push_tokens (player_id);
+
+create table if not exists hb_active_rooms (
+    code varchar(6) primary key,
+    match_id uuid not null,
+    status varchar(20) not null,
+    visibility varchar(10) not null default 'public',
+    host_id uuid not null references hb_players(id) on delete cascade,
+    guest_id uuid references hb_players(id) on delete cascade,
+    state jsonb not null,
+    expires_at timestamptz not null,
+    updated_at timestamptz not null default now()
+);
+
+create index if not exists hb_active_rooms_status_idx on hb_active_rooms (status, visibility, expires_at);
+create index if not exists hb_active_rooms_host_idx on hb_active_rooms (host_id);
+create index if not exists hb_active_rooms_guest_idx on hb_active_rooms (guest_id);
+
 alter table hb_seasons enable row level security;
 alter table hb_players enable row level security;
 alter table hb_player_season_stats enable row level security;
 alter table hb_matches enable row level security;
 alter table hb_record_resets enable row level security;
+alter table hb_push_tokens enable row level security;
+alter table hb_active_rooms enable row level security;
 
 revoke all on hb_seasons from anon, authenticated;
 revoke all on hb_players from anon, authenticated;
 revoke all on hb_player_season_stats from anon, authenticated;
 revoke all on hb_matches from anon, authenticated;
 revoke all on hb_record_resets from anon, authenticated;
+revoke all on hb_push_tokens from anon, authenticated;
+revoke all on hb_active_rooms from anon, authenticated;
 
 insert into hb_seasons (name, is_active)
 select '시즌 1', true

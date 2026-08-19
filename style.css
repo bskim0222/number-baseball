@@ -1273,6 +1273,123 @@ body {
     flex-direction: column;
 }
 
+.create-room-dialog {
+    width: min(92vw, 390px);
+    padding: 24px;
+    text-align: left;
+}
+
+.create-room-dialog h2 {
+    margin: 0 0 22px;
+    font-size: 1.25rem;
+    text-align: center;
+}
+
+.create-room-dialog h2 i {
+    color: var(--neon-blue);
+    margin-right: 6px;
+}
+
+.create-room-label {
+    display: block;
+    margin: 14px 0 8px;
+    color: var(--text-secondary);
+    font-size: 0.84rem;
+    font-weight: 700;
+}
+
+.create-room-title-input {
+    width: 100%;
+    height: 48px;
+    padding: 0 13px;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 7px;
+    background: var(--bg-slot);
+    color: var(--text-primary);
+    font-size: 1rem;
+    outline: none;
+}
+
+.create-room-title-input:focus {
+    border-color: var(--neon-blue);
+    box-shadow: 0 0 0 2px rgba(0,210,255,0.12);
+}
+
+.room-visibility-control {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.visibility-option {
+    min-height: 54px;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 7px;
+    background: rgba(255,255,255,0.035);
+    color: var(--text-muted);
+    font-weight: 700;
+}
+
+.visibility-option i {
+    margin-right: 6px;
+}
+
+.visibility-option.active {
+    border-color: var(--neon-blue);
+    background: rgba(0,210,255,0.1);
+    color: var(--neon-blue);
+}
+
+.room-visibility-help {
+    min-height: 36px;
+    margin: 9px 0 15px;
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    line-height: 1.45;
+}
+
+.create-room-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 9px;
+}
+
+.room-code-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.waiting-room-title {
+    display: block;
+    max-width: 250px;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-size: 0.96rem;
+    font-weight: 800;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.room-visibility-badge {
+    flex: 0 0 auto;
+    padding: 5px 8px;
+    border: 1px solid rgba(0,210,255,0.35);
+    border-radius: 6px;
+    background: rgba(0,210,255,0.08);
+    color: var(--neon-blue);
+    font-size: 0.72rem;
+    font-weight: 800;
+}
+
+.room-visibility-badge.private {
+    border-color: rgba(189,0,255,0.4);
+    background: rgba(189,0,255,0.1);
+    color: #df72ff;
+}
+
 .modal-header {
     display: flex;
     justify-content: space-between;

@@ -11,7 +11,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700&family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
     <!-- FontAwesome for Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=20260819-v11-match-alerts">
     <!-- Window Error Logger for easy debugging -->
     <script>
         window.onerror = function (message, source, lineno, colno, error) {
@@ -193,11 +193,17 @@
             </header>
 
             <section class="room-code-section">
-                <span class="room-code-label">대기방 코드</span>
+                <div class="room-code-heading">
+                    <div>
+                        <span id="waiting-room-title" class="waiting-room-title">대전방</span>
+                        <span class="room-code-label">대기방 코드</span>
+                    </div>
+                    <span id="room-visibility-badge" class="room-visibility-badge public">공개방</span>
+                </div>
                 <div class="room-code-box">
-                    <span id="room-code-value">ROOM-7829</span>
-                    <button id="btn-copy-code" class="copy-btn" title="방 코드 복사">
-                        <i class="fa-solid fa-copy"></i>
+                    <span id="room-code-value">7829</span>
+                    <button id="btn-copy-code" class="copy-btn" title="초대 공유">
+                        <i class="fa-solid fa-share-nodes"></i>
                     </button>
                 </div>
             </section>
@@ -451,12 +457,39 @@
         </div>
     </div>
 
-    <!-- 3. Join Room Modal -->
+    <!-- 3. Create Room Modal -->
+    <div id="create-room-modal" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true">
+        <div class="modal-content create-room-dialog scale-up">
+            <h2><i class="fa-solid fa-baseball"></i> 대전방 만들기</h2>
+            <label class="create-room-label" for="create-room-title">방 제목</label>
+            <input id="create-room-title" class="create-room-title-input" type="text" maxlength="20" autocomplete="off" placeholder="예: 초보 환영">
+
+            <span class="create-room-label">공개 설정</span>
+            <div class="room-visibility-control" role="group" aria-label="방 공개 설정">
+                <button id="btn-room-public" type="button" class="visibility-option active" data-visibility="public">
+                    <i class="fa-solid fa-earth-asia"></i>
+                    <span>공개방</span>
+                </button>
+                <button id="btn-room-private" type="button" class="visibility-option" data-visibility="private">
+                    <i class="fa-solid fa-lock"></i>
+                    <span>비공개방</span>
+                </button>
+            </div>
+            <p id="room-visibility-help" class="room-visibility-help">공개방 목록에 표시되어 누구나 참가할 수 있습니다.</p>
+
+            <div class="create-room-actions">
+                <button id="btn-close-create" type="button" class="message-dialog-btn secondary">취소</button>
+                <button id="btn-submit-create" type="button" class="message-dialog-btn primary">방 만들기</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 4. Join Room Modal -->
     <div id="join-modal" class="modal-overlay hidden" aria-hidden="true" role="dialog">
-        <div class="modal-content result-content scale-up" style="max-height: 280px; padding: 25px;">
+        <div class="modal-content result-content scale-up" style="max-height: 300px; padding: 25px;">
             <h2 class="result-title" style="font-size: 1.3rem; margin-bottom: 10px;">🔑 방 참가하기</h2>
-            <p class="result-message" style="margin-bottom: 15px;">참가할 4자리 방 번호를 입력해 주세요.</p>
-            <input type="text" id="join-room-input" placeholder="예: 7829" maxlength="4" style="width:100%; text-align:center; padding:12px; font-size:1.5rem; letter-spacing:4px; font-family:var(--font-numeric); font-weight:700; background:var(--bg-slot); border:1px solid rgba(255,255,255,0.1); border-radius:var(--radius-md); color:var(--neon-blue); outline:none; margin-bottom: 15px;">
+            <p class="result-message" style="margin-bottom: 15px;">공개방 번호 또는 비공개 초대 코드를 입력해 주세요.</p>
+            <input type="text" inputmode="numeric" pattern="[0-9]*" id="join-room-input" placeholder="방 코드 입력" maxlength="6" style="width:100%; text-align:center; padding:12px; font-size:1.5rem; letter-spacing:4px; font-family:var(--font-numeric); font-weight:700; background:var(--bg-slot); border:1px solid rgba(255,255,255,0.1); border-radius:var(--radius-md); color:var(--neon-blue); outline:none; margin-bottom: 15px;">
             <div style="display:flex; width:100%; gap:10px;">
                 <button id="btn-close-join" class="restart-btn" style="background:rgba(255,255,255,0.05); color:var(--text-muted); box-shadow:none; font-size:0.95rem; padding:10px 0;">취소</button>
                 <button id="btn-submit-join" class="restart-btn" style="font-size:0.95rem; padding:10px 0;">입장하기</button>
@@ -464,7 +497,7 @@
         </div>
     </div>
 
-    <!-- 4. Account and record management -->
+    <!-- 5. Account and record management -->
     <div id="account-modal" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true">
         <div class="modal-content account-dialog scale-up">
             <div class="account-dialog-header">
@@ -535,9 +568,9 @@
     <!-- Platform bridge & config -->
     <script src="api-config.js"></script>
     <script src="auth-client.js"></script>
-    <script src="game-bridge.js"></script>
+    <script src="game-bridge.js?v=20260819-v11-match-alerts"></script>
 
     <!-- Main Game Logic -->
-    <script src="app.js?v=20260818-v9-test-ads"></script>
+    <script src="app.js?v=20260819-v11-match-alerts"></script>
 </body>
 </html>
