@@ -194,12 +194,15 @@ test('private rooms stay hidden, restore for the host, and trigger a push event'
 });
 
 test('public rooms expose their custom title and can replace an unfinished waiting room', async () => {
+    const createdAfter = Date.now();
     const room = await api('/api/create', {
         method: 'POST',
         body: JSON.stringify({ hostName: '테스트홈', roomTitle: '1234567890123456789012345', visibility: 'public' })
     }, HOST_ID);
     assert.equal(room.code.length, 4);
     assert.equal(room.roomTitle.length, 20);
+    assert.ok(room.expiresAt >= createdAfter + (60 * 60_000));
+    assert.ok(room.expiresAt <= Date.now() + (60 * 60_000));
     const publicRooms = await api('/api/rooms', {}, GUEST_ID);
     const listed = publicRooms.find(item => item.code === room.code);
     assert.equal(listed.roomTitle, room.roomTitle);
