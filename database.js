@@ -32,6 +32,30 @@ function roomSnapshot(room) {
     return JSON.parse(JSON.stringify(state));
 }
 
+function storeError(message, status = 409) {
+    const error = new Error(message);
+    error.status = status;
+    return error;
+}
+
+function publicChallenge(challenge, userId) {
+    if (!challenge) return null;
+    const challengerId = String(challenge.challengerId || challenge.challenger_id);
+    const targetId = String(challenge.targetId || challenge.target_id);
+    return {
+        id: String(challenge.id),
+        challengerId,
+        targetId,
+        direction: challengerId === String(userId) ? 'outgoing' : 'incoming',
+        status: challenge.status,
+        roomCode: challenge.roomCode || challenge.room_code || null,
+        expiresAt: Number(challenge.expiresAt || challenge.expires_at || 0),
+        createdAt: Number(challenge.createdAt || challenge.created_at || 0),
+        challenger: challenge.challenger || null,
+        target: challenge.target || null
+    };
+}
+
 class MemoryStore {
     constructor() {
         this.players = new Map();
@@ -40,6 +64,8 @@ class MemoryStore {
         this.resets = [];
         this.pushTokens = new Map();
         this.activeRooms = new Map();
+        this.presence = new Map();
+        this.challenges = new Map();
         this.season = { id: 1, name: '시즌 1' };
     }
 
@@ -110,6 +136,10 @@ class MemoryStore {
         this.players.delete(id);
         this.stats.delete(id);
         this.pushTokens.delete(id);
+        this.presence.delete(id);
+        for (const [challengeId, challenge] of this.challenges.entries()) {
+            if (challenge.challengerId === id || challenge.targetId === id) this.challenges.delete(challengeId);
+        }
         for (const [code, room] of this.activeRooms.entries()) {
             if (room.host.id === id || (room.guest && room.guest.id === id)) {
                 this.activeRooms.delete(code);
@@ -170,6 +200,148 @@ class MemoryStore {
                 hostName: room.host.name,
                 expiresAt: room.expiresAt
             }));
+    }
+
+    expireChallenges(now = Date.now()) {
+        for (const challenge of this.challenges.values()) {
+            if (challenge.status === 'pending' && challenge.expiresAt <= now) {
+                challenge.status = 'expired';
+                challenge.updatedAt = now;
+            }
+        }
+    }
+
+    playerHasActiveRoom(userId, now = Date.now()) {
+        return [...this.activeRooms.values()].some(room =>
+            room.expiresAt > now
+            && ['waiting', 'setup', 'playing'].includes(room.status)
+            && (room.host.id === userId || (room.guest && room.guest.id === userId))
+        );
+    }
+
+    async touchPresence(userId, acceptingChallenges) {
+        const now = Date.now();
+        const current = this.presence.get(userId) || { userId, availableUntil: 0 };
+        current.lastSeen = now;
+        if (typeof acceptingChallenges === 'boolean') {
+            current.availableUntil = acceptingChallenges ? now + 60 * 60_000 : 0;
+        }
+        this.presence.set(userId, current);
+        return {
+            acceptingChallenges: current.availableUntil > now && !this.playerHasActiveRoom(userId, now),
+            availableUntil: current.availableUntil
+        };
+    }
+
+    async getLobbyState(userId) {
+        const now = Date.now();
+        this.expireChallenges(now);
+        const playingIds = new Set();
+        for (const room of this.activeRooms.values()) {
+            if (room.expiresAt <= now || !['setup', 'playing'].includes(room.status)) continue;
+            playingIds.add(room.host.id);
+            if (room.guest) playingIds.add(room.guest.id);
+        }
+
+        const availablePlayers = [];
+        for (const [id, state] of this.presence.entries()) {
+            if (id === userId || state.availableUntil <= now || this.playerHasActiveRoom(id, now)) continue;
+            const player = await this.getPlayer(id);
+            if (player) availablePlayers.push({
+                ...player,
+                online: now - state.lastSeen <= 45_000,
+                availableUntil: state.availableUntil
+            });
+        }
+        availablePlayers.sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name, 'ko'));
+
+        const currentChallenge = [...this.challenges.values()]
+            .filter(challenge => challenge.challengerId === userId || challenge.targetId === userId)
+            .filter(challenge => challenge.status === 'pending'
+                || (challenge.status === 'accepted' && now - challenge.updatedAt <= 2 * 60_000)
+                || (['declined', 'expired', 'cancelled'].includes(challenge.status) && now - challenge.updatedAt <= 15_000))
+            .sort((a, b) => b.updatedAt - a.updatedAt)[0] || null;
+        if (currentChallenge) {
+            currentChallenge.challenger = await this.getPlayer(currentChallenge.challengerId);
+            currentChallenge.target = await this.getPlayer(currentChallenge.targetId);
+        }
+
+        const me = this.presence.get(userId) || { availableUntil: 0 };
+        return {
+            counts: {
+                online: [...this.presence.values()].filter(item => now - item.lastSeen <= 45_000).length,
+                available: [...this.presence.entries()].filter(([id, item]) => item.availableUntil > now && !this.playerHasActiveRoom(id, now)).length,
+                playing: playingIds.size
+            },
+            me: { acceptingChallenges: me.availableUntil > now && !this.playerHasActiveRoom(userId, now), availableUntil: me.availableUntil },
+            availablePlayers,
+            challenge: publicChallenge(currentChallenge, userId)
+        };
+    }
+
+    async createChallenge(challengerId, targetId, expiresAt) {
+        const now = Date.now();
+        this.expireChallenges(now);
+        if (challengerId === targetId) throw storeError('자기 자신에게는 대전을 신청할 수 없습니다.', 400);
+        const targetPresence = this.presence.get(targetId);
+        if (!targetPresence || targetPresence.availableUntil <= now || this.playerHasActiveRoom(targetId, now)) {
+            throw storeError('상대방이 현재 대전 신청을 받을 수 없습니다.');
+        }
+        if (this.playerHasActiveRoom(challengerId, now)) throw storeError('진행 중인 대전을 먼저 종료해 주세요.');
+        const conflict = [...this.challenges.values()].find(challenge =>
+            challenge.status === 'pending'
+            && [challenge.challengerId, challenge.targetId].some(id => id === challengerId || id === targetId)
+        );
+        if (conflict) throw storeError('이미 처리 중인 대전 신청이 있습니다.');
+        const recent = [...this.challenges.values()].find(challenge =>
+            challenge.updatedAt > now - 10_000
+            && challenge.challengerId === challengerId
+            && challenge.targetId === targetId
+        );
+        if (recent) throw storeError('잠시 후 다시 신청해 주세요.', 429);
+
+        const challenge = {
+            id: require('node:crypto').randomUUID(),
+            challengerId,
+            targetId,
+            status: 'pending',
+            roomCode: null,
+            expiresAt,
+            createdAt: now,
+            updatedAt: now,
+            challenger: await this.getPlayer(challengerId),
+            target: await this.getPlayer(targetId)
+        };
+        this.challenges.set(challenge.id, challenge);
+        return publicChallenge(challenge, challengerId);
+    }
+
+    async respondToChallenge(challengeId, targetId, action) {
+        const now = Date.now();
+        this.expireChallenges(now);
+        const challenge = this.challenges.get(String(challengeId));
+        if (!challenge || challenge.targetId !== targetId) throw storeError('대전 신청을 찾을 수 없습니다.', 404);
+        if (challenge.status !== 'pending') throw storeError('이미 처리되었거나 만료된 대전 신청입니다.');
+        challenge.status = action === 'accept' ? 'accepted' : 'declined';
+        challenge.updatedAt = now;
+        challenge.challenger = await this.getPlayer(challenge.challengerId);
+        challenge.target = await this.getPlayer(challenge.targetId);
+        return publicChallenge(challenge, targetId);
+    }
+
+    async setChallengeRoom(challengeId, roomCode) {
+        const challenge = this.challenges.get(String(challengeId));
+        if (!challenge) throw storeError('대전 신청을 찾을 수 없습니다.', 404);
+        challenge.roomCode = String(roomCode);
+        challenge.updatedAt = Date.now();
+    }
+
+    async cancelChallenge(challengeId) {
+        const challenge = this.challenges.get(String(challengeId));
+        if (challenge && challenge.status !== 'declined') {
+            challenge.status = 'cancelled';
+            challenge.updatedAt = Date.now();
+        }
     }
 
     async startSeason(name) {
@@ -374,6 +546,8 @@ class PostgresStore {
         try {
             await client.query('begin');
             await client.query('delete from hb_push_tokens where player_id = $1', [id]);
+            await client.query('delete from hb_match_challenges where challenger_id = $1 or target_id = $1', [id]);
+            await client.query('delete from hb_player_presence where player_id = $1', [id]);
             await client.query('delete from hb_active_rooms where host_id = $1 or guest_id = $1', [id]);
             await client.query('delete from hb_matches where winner_id = $1 or loser_id = $1', [id]);
             await client.query('delete from hb_record_resets where player_id = $1', [id]);
@@ -484,6 +658,199 @@ class PostgresStore {
         }));
     }
 
+    async touchPresence(userId, acceptingChallenges) {
+        const hasChoice = typeof acceptingChallenges === 'boolean';
+        const result = await this.pool.query(
+            `insert into hb_player_presence (player_id, last_seen, available_until, updated_at)
+             values ($1, now(), case when $2 then now() + interval '1 hour' else null end, now())
+             on conflict (player_id) do update set
+                last_seen = now(),
+                available_until = case
+                    when $3 = false then hb_player_presence.available_until
+                    when $2 then now() + interval '1 hour'
+                    else null
+                end,
+                updated_at = now()
+             returning extract(epoch from available_until) * 1000 as available_until`,
+            [userId, acceptingChallenges === true, hasChoice]
+        );
+        const availableUntil = Number(result.rows[0].available_until) || 0;
+        const active = await this.findActiveRoom(userId);
+        return { acceptingChallenges: availableUntil > Date.now() && !active, availableUntil };
+    }
+
+    async getLobbyState(userId) {
+        await this.pool.query(
+            `update hb_match_challenges set status = 'expired', updated_at = now()
+             where status = 'pending' and expires_at <= now()`
+        );
+        const [countsResult, availableResult, meResult, challengeResult] = await Promise.all([
+            this.pool.query(
+                `select
+                    (select count(*) from hb_player_presence where last_seen > now() - interval '45 seconds')::int as online,
+                    (select count(*) from hb_player_presence p
+                     where p.available_until > now() and not exists (
+                         select 1 from hb_active_rooms r
+                         where (r.host_id = p.player_id or r.guest_id = p.player_id)
+                           and r.status in ('waiting', 'setup', 'playing') and r.expires_at > now()
+                     ))::int as available,
+                    (select count(distinct player_id)::int from (
+                         select host_id as player_id from hb_active_rooms where status in ('setup', 'playing') and expires_at > now()
+                         union all
+                         select guest_id as player_id from hb_active_rooms where guest_id is not null and status in ('setup', 'playing') and expires_at > now()
+                    ) active_players)::int as playing`
+            ),
+            this.pool.query(
+                `select p.id, p.nickname, coalesce(s.wins, 0) as wins, coalesce(s.losses, 0) as losses,
+                        season.id as season_id, season.name as season_name,
+                        presence.last_seen > now() - interval '45 seconds' as online,
+                        extract(epoch from presence.available_until) * 1000 as available_until
+                 from hb_player_presence presence
+                 join hb_players p on p.id = presence.player_id and p.deleted_at is null
+                 join hb_seasons season on season.is_active = true
+                 left join hb_player_season_stats s on s.player_id = p.id and s.season_id = season.id
+                 where presence.available_until > now() and p.id <> $1
+                   and not exists (
+                       select 1 from hb_active_rooms r
+                       where (r.host_id = p.id or r.guest_id = p.id)
+                         and r.status in ('waiting', 'setup', 'playing') and r.expires_at > now()
+                   )
+                 order by online desc, p.nickname asc`,
+                [userId]
+            ),
+            this.pool.query(
+                `select extract(epoch from available_until) * 1000 as available_until
+                 from hb_player_presence where player_id = $1`,
+                [userId]
+            ),
+            this.pool.query(
+                `select c.*,
+                        cp.nickname as challenger_name, coalesce(cs.wins, 0) as challenger_wins, coalesce(cs.losses, 0) as challenger_losses,
+                        tp.nickname as target_name, coalesce(ts.wins, 0) as target_wins, coalesce(ts.losses, 0) as target_losses,
+                        season.id as season_id, season.name as season_name,
+                        extract(epoch from c.expires_at) * 1000 as expires_at_ms,
+                        extract(epoch from c.created_at) * 1000 as created_at_ms
+                 from hb_match_challenges c
+                 join hb_players cp on cp.id = c.challenger_id
+                 join hb_players tp on tp.id = c.target_id
+                 join hb_seasons season on season.is_active = true
+                 left join hb_player_season_stats cs on cs.player_id = cp.id and cs.season_id = season.id
+                 left join hb_player_season_stats ts on ts.player_id = tp.id and ts.season_id = season.id
+                 where (c.challenger_id = $1 or c.target_id = $1)
+                   and (c.status = 'pending'
+                        or (c.status = 'accepted' and c.updated_at > now() - interval '2 minutes')
+                        or (c.status in ('declined', 'expired', 'cancelled') and c.updated_at > now() - interval '15 seconds'))
+                 order by c.updated_at desc limit 1`,
+                [userId]
+            )
+        ]);
+
+        const availablePlayers = availableResult.rows.map(row => ({
+            ...publicPlayer(row),
+            online: Boolean(row.online),
+            availableUntil: Number(row.available_until)
+        }));
+        const row = challengeResult.rows[0];
+        let challenge = null;
+        if (row) {
+            challenge = publicChallenge({
+                ...row,
+                expires_at: row.expires_at_ms,
+                created_at: row.created_at_ms,
+                challenger: publicPlayer({ id: row.challenger_id, nickname: row.challenger_name, wins: row.challenger_wins, losses: row.challenger_losses, season_id: row.season_id, season_name: row.season_name }),
+                target: publicPlayer({ id: row.target_id, nickname: row.target_name, wins: row.target_wins, losses: row.target_losses, season_id: row.season_id, season_name: row.season_name })
+            }, userId);
+        }
+        const availableUntil = Number(meResult.rows[0] && meResult.rows[0].available_until) || 0;
+        const active = await this.findActiveRoom(userId);
+        return {
+            counts: countsResult.rows[0],
+            me: { acceptingChallenges: availableUntil > Date.now() && !active, availableUntil },
+            availablePlayers,
+            challenge
+        };
+    }
+
+    async createChallenge(challengerId, targetId, expiresAt) {
+        if (challengerId === targetId) throw storeError('자기 자신에게는 대전을 신청할 수 없습니다.', 400);
+        const client = await this.pool.connect();
+        try {
+            await client.query('begin');
+            await client.query('select pg_advisory_xact_lock(hashtext($1))', [[challengerId, targetId].sort().join(':')]);
+            await client.query("update hb_match_challenges set status = 'expired', updated_at = now() where status = 'pending' and expires_at <= now()");
+            const target = await client.query(
+                `select 1 from hb_player_presence p where p.player_id = $1 and p.available_until > now()
+                 and not exists (select 1 from hb_active_rooms r where (r.host_id = $1 or r.guest_id = $1)
+                    and r.status in ('waiting', 'setup', 'playing') and r.expires_at > now())`,
+                [targetId]
+            );
+            if (!target.rows[0]) throw storeError('상대방이 현재 대전 신청을 받을 수 없습니다.');
+            const conflict = await client.query(
+                `select 1 from hb_match_challenges where status = 'pending'
+                 and (challenger_id in ($1, $2) or target_id in ($1, $2)) limit 1`,
+                [challengerId, targetId]
+            );
+            if (conflict.rows[0]) throw storeError('이미 처리 중인 대전 신청이 있습니다.');
+            const recent = await client.query(
+                `select 1 from hb_match_challenges where challenger_id = $1 and target_id = $2
+                 and updated_at > now() - interval '10 seconds' limit 1`,
+                [challengerId, targetId]
+            );
+            if (recent.rows[0]) throw storeError('잠시 후 다시 신청해 주세요.', 429);
+            const id = require('node:crypto').randomUUID();
+            await client.query(
+                `insert into hb_match_challenges (id, challenger_id, target_id, expires_at)
+                 values ($1, $2, $3, to_timestamp($4 / 1000.0))`,
+                [id, challengerId, targetId, expiresAt]
+            );
+            await client.query('commit');
+            return publicChallenge({ id, challengerId, targetId, status: 'pending', expiresAt, createdAt: Date.now() }, challengerId);
+        } catch (error) {
+            await client.query('rollback');
+            throw error;
+        } finally {
+            client.release();
+        }
+    }
+
+    async respondToChallenge(challengeId, targetId, action) {
+        const client = await this.pool.connect();
+        try {
+            await client.query('begin');
+            const result = await client.query('select * from hb_match_challenges where id = $1 for update', [challengeId]);
+            const challenge = result.rows[0];
+            if (!challenge || String(challenge.target_id) !== String(targetId)) throw storeError('대전 신청을 찾을 수 없습니다.', 404);
+            if (challenge.status !== 'pending' || new Date(challenge.expires_at).getTime() <= Date.now()) {
+                if (challenge.status === 'pending') await client.query("update hb_match_challenges set status = 'expired', updated_at = now() where id = $1", [challengeId]);
+                throw storeError('이미 처리되었거나 만료된 대전 신청입니다.');
+            }
+            const status = action === 'accept' ? 'accepted' : 'declined';
+            await client.query('update hb_match_challenges set status = $2, updated_at = now() where id = $1', [challengeId, status]);
+            await client.query('commit');
+            return publicChallenge({ ...challenge, status, expires_at: new Date(challenge.expires_at).getTime(), created_at: new Date(challenge.created_at).getTime() }, targetId);
+        } catch (error) {
+            await client.query('rollback');
+            throw error;
+        } finally {
+            client.release();
+        }
+    }
+
+    async setChallengeRoom(challengeId, roomCode) {
+        await this.pool.query(
+            `update hb_match_challenges set room_code = $2, status = 'accepted', updated_at = now() where id = $1`,
+            [challengeId, String(roomCode)]
+        );
+    }
+
+    async cancelChallenge(challengeId) {
+        await this.pool.query(
+            `update hb_match_challenges set status = 'cancelled', updated_at = now()
+             where id = $1 and status <> 'declined'`,
+            [challengeId]
+        );
+    }
+
     async startSeason(name) {
         const client = await this.pool.connect();
         try {
@@ -521,5 +888,6 @@ module.exports = {
     createPostgresPoolOptions,
     createDataStore,
     publicPlayer,
-    safePlayerName
+    safePlayerName,
+    publicChallenge
 };

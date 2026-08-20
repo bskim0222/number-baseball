@@ -109,6 +109,28 @@
                 </div>
             </section>
 
+            <section class="match-hub" aria-labelledby="match-hub-title">
+                <div class="presence-summary" aria-label="현재 접속 현황">
+                    <div><strong id="presence-online">0</strong><span>접속</span></div>
+                    <div><strong id="presence-available">0</strong><span>대전 대기</span></div>
+                    <div><strong id="presence-playing">0</strong><span>게임 중</span></div>
+                </div>
+                <div class="match-hub-header">
+                    <div>
+                        <h2 id="match-hub-title"><i class="fa-solid fa-bolt"></i> 바로 대전</h2>
+                        <p id="match-waiting-status">대전 대기를 켜면 신청을 받을 수 있습니다.</p>
+                    </div>
+                    <label class="match-waiting-toggle" title="대전 대기 설정">
+                        <input id="match-waiting-checkbox" type="checkbox" aria-label="대전 대기">
+                        <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                    </label>
+                </div>
+                <div id="outgoing-challenge-status" class="outgoing-challenge-status hidden"></div>
+                <div id="available-player-list" class="available-player-list">
+                    <div class="match-list-empty">대전 대기 중인 사용자가 없습니다.</div>
+                </div>
+            </section>
+
             <section class="menu-list">
                 <button id="btn-menu-solo" class="menu-btn primary-btn">
                     <i class="fa-solid fa-user"></i> 혼자 연습하기
@@ -549,6 +571,21 @@
         </div>
     </div>
 
+    <div id="challenge-modal" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true">
+        <div class="challenge-dialog scale-up">
+            <div class="challenge-dialog-icon"><i class="fa-solid fa-baseball-bat-ball"></i></div>
+            <span class="challenge-dialog-kicker">1:1 MATCH REQUEST</span>
+            <h2>대전 신청이 왔습니다</h2>
+            <p id="challenge-opponent-name" class="challenge-opponent-name">상대방</p>
+            <p id="challenge-opponent-record" class="challenge-opponent-record">0승 0패 · 승률 0%</p>
+            <div class="challenge-expiry"><i class="fa-regular fa-clock"></i> <span id="challenge-expiry-seconds">30</span>초 안에 선택해 주세요.</div>
+            <div class="challenge-dialog-actions">
+                <button id="btn-decline-challenge" type="button" class="message-dialog-btn secondary">거절</button>
+                <button id="btn-accept-challenge" type="button" class="message-dialog-btn primary">수락</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 5. App-styled confirmation dialog -->
     <div id="message-modal" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true">
         <div class="message-dialog scale-up">
@@ -568,9 +605,9 @@
     <!-- Platform bridge & config -->
     <script src="api-config.js"></script>
     <script src="auth-client.js"></script>
-    <script src="game-bridge.js?v=20260819-v11-match-alerts"></script>
+    <script src="game-bridge.js?v=20260820-v12-direct-match"></script>
 
     <!-- Main Game Logic -->
-    <script src="app.js?v=20260819-v11-match-alerts"></script>
+    <script src="app.js?v=20260820-v12-direct-match"></script>
 </body>
 </html>

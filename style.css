@@ -203,6 +203,260 @@ body {
     color: var(--text-muted);
 }
 
+.match-hub {
+    margin-bottom: 18px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 14px 0;
+}
+
+.presence-summary {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    margin-bottom: 14px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+
+.presence-summary div {
+    min-width: 0;
+    padding: 9px 4px;
+    background: rgba(10, 15, 31, 0.96);
+    text-align: center;
+}
+
+.presence-summary strong,
+.presence-summary span {
+    display: block;
+}
+
+.presence-summary strong {
+    color: var(--neon-blue);
+    font-family: var(--font-numeric);
+    font-size: 1rem;
+}
+
+.presence-summary span {
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+}
+
+.match-hub-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.match-hub-header h2 {
+    color: var(--text-main);
+    font-size: 0.98rem;
+}
+
+.match-hub-header h2 i {
+    margin-right: 5px;
+    color: var(--neon-gold);
+}
+
+.match-hub-header p {
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    line-height: 1.4;
+}
+
+.match-waiting-toggle {
+    flex: 0 0 auto;
+    cursor: pointer;
+}
+
+.match-waiting-toggle input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.toggle-track {
+    width: 48px;
+    height: 28px;
+    padding: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.08);
+    display: block;
+    transition: var(--transition-smooth);
+}
+
+.toggle-thumb {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #94a3b8;
+    display: block;
+    transition: var(--transition-smooth);
+}
+
+.match-waiting-toggle input:checked + .toggle-track {
+    border-color: var(--neon-green);
+    background: rgba(51, 255, 51, 0.14);
+}
+
+.match-waiting-toggle input:checked + .toggle-track .toggle-thumb {
+    background: var(--neon-green);
+    transform: translateX(20px);
+    box-shadow: 0 0 10px rgba(51, 255, 51, 0.55);
+}
+
+.available-player-list {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    max-height: 190px;
+    margin-top: 12px;
+    overflow-y: auto;
+}
+
+.available-player-row {
+    min-height: 50px;
+    padding: 8px 9px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: var(--radius-sm);
+    background: rgba(255, 255, 255, 0.035);
+    display: flex;
+    align-items: center;
+    gap: 9px;
+}
+
+.available-player-avatar {
+    color: var(--neon-blue);
+    font-size: 1.45rem;
+}
+
+.available-player-copy {
+    min-width: 0;
+    flex: 1;
+}
+
+.available-player-copy strong,
+.available-player-copy span {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.available-player-copy strong {
+    font-size: 0.86rem;
+}
+
+.available-player-copy span {
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+}
+
+.player-online-state {
+    color: var(--neon-green);
+}
+
+.challenge-player-btn {
+    min-width: 58px;
+    height: 32px;
+    border: 1px solid rgba(0, 210, 255, 0.42);
+    border-radius: var(--radius-sm);
+    background: rgba(0, 210, 255, 0.1);
+    color: var(--neon-blue);
+    font-size: 0.76rem;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+.challenge-player-btn:disabled {
+    cursor: default;
+    opacity: 0.35;
+}
+
+.match-list-empty {
+    padding: 12px 4px 2px;
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    text-align: center;
+}
+
+.outgoing-challenge-status {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border: 1px solid rgba(255, 215, 0, 0.18);
+    border-radius: var(--radius-sm);
+    color: var(--neon-gold);
+    background: rgba(255, 215, 0, 0.05);
+    font-size: 0.75rem;
+    text-align: center;
+}
+
+.challenge-dialog {
+    width: min(360px, calc(100% - 32px));
+    padding: 24px;
+    border: 1px solid rgba(0, 210, 255, 0.34);
+    border-radius: var(--radius-lg);
+    background: var(--bg-card);
+    box-shadow: 0 0 30px rgba(0, 210, 255, 0.16);
+    text-align: center;
+}
+
+.challenge-dialog-icon {
+    width: 54px;
+    height: 54px;
+    margin: 0 auto 10px;
+    border: 1px solid var(--neon-blue);
+    border-radius: 50%;
+    color: var(--neon-blue);
+    display: grid;
+    place-items: center;
+    font-size: 1.35rem;
+}
+
+.challenge-dialog-kicker {
+    color: var(--neon-blue);
+    font-family: var(--font-numeric);
+    font-size: 0.65rem;
+    font-weight: 800;
+}
+
+.challenge-dialog h2 {
+    margin-top: 5px;
+    font-size: 1.2rem;
+}
+
+.challenge-opponent-name {
+    margin-top: 16px;
+    color: var(--text-main);
+    font-size: 1.05rem;
+    font-weight: 800;
+}
+
+.challenge-opponent-record {
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+}
+
+.challenge-expiry {
+    margin-top: 14px;
+    color: var(--neon-gold);
+    font-size: 0.78rem;
+}
+
+.challenge-dialog-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 20px;
+}
+
 /* Menu Buttons in Lobby */
 .menu-list {
     display: flex;

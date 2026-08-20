@@ -36,7 +36,7 @@ function createPushService(options = {}) {
         }
     }
 
-    async function sendRoomJoined(userId, room) {
+    async function sendNotification(userId, payload) {
         if (!configured || !messaging || !dataStore) return { sent: 0, skipped: true };
 
         const tokens = await dataStore.getPushTokens(userId);
@@ -44,21 +44,14 @@ function createPushService(options = {}) {
 
         const response = await messaging.sendEachForMulticast({
             tokens,
-            notification: {
-                title: '상대방이 입장했습니다',
-                body: `${room.guestName}님이 ${room.roomTitle}에 입장했습니다.`
-            },
-            data: {
-                type: 'room_joined',
-                roomCode: String(room.roomCode),
-                role: 'host'
-            },
+            notification: payload.notification,
+            data: Object.fromEntries(Object.entries(payload.data || {}).map(([key, value]) => [key, String(value)])),
             android: {
                 priority: 'high',
                 notification: {
                     channelId: 'match_alerts',
                     sound: 'default',
-                    tag: `room-${room.roomCode}`
+                    tag: payload.tag || 'match-alert'
                 }
             }
         });
@@ -75,9 +68,49 @@ function createPushService(options = {}) {
         return { sent: response.successCount, failed: response.failureCount };
     }
 
+    function sendRoomJoined(userId, room) {
+        return sendNotification(userId, {
+            notification: {
+                title: '상대방이 입장했습니다',
+                body: `${room.guestName}님이 ${room.roomTitle}에 입장했습니다.`
+            },
+            data: { type: 'room_joined', roomCode: room.roomCode, role: 'host' },
+            tag: `room-${room.roomCode}`
+        });
+    }
+
+    function sendChallengeReceived(userId, challenge) {
+        return sendNotification(userId, {
+            notification: {
+                title: '새 대전 신청',
+                body: `${challenge.challengerName}님이 1:1 대전을 신청했습니다.`
+            },
+            data: { type: 'challenge_received', challengeId: challenge.challengeId },
+            tag: `challenge-${challenge.challengeId}`
+        });
+    }
+
+    function sendChallengeAccepted(userId, challenge) {
+        return sendNotification(userId, {
+            notification: {
+                title: '대전 신청 수락',
+                body: `${challenge.targetName}님이 신청을 수락했습니다. 대기실로 이동하세요.`
+            },
+            data: {
+                type: 'challenge_accepted',
+                challengeId: challenge.challengeId,
+                roomCode: challenge.roomCode,
+                role: 'host'
+            },
+            tag: `challenge-${challenge.challengeId}`
+        });
+    }
+
     return {
         configured: () => configured,
-        sendRoomJoined
+        sendRoomJoined,
+        sendChallengeReceived,
+        sendChallengeAccepted
     };
 }
 

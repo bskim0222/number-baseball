@@ -21,6 +21,7 @@ const WAITING_ROOM_TTL_MS = 60 * 60_000;
 const SETUP_ROOM_TTL_MS = 2 * 60_000;
 const ACTIVE_ROOM_TTL_MS = 2 * 60 * 60_000;
 const FINISHED_ROOM_RETENTION_MS = 10 * 60_000;
+const CHALLENGE_TTL_MS = 30_000;
 
 const rooms = {};
 const auth = createAuth();
@@ -44,6 +45,55 @@ const pushService = createPushService({ dataStore });
 function safeRoomTitle(value, hostName) {
     const title = typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').slice(0, 20) : '';
     return title || `${hostName}님의 방`;
+}
+
+async function generateRoomCode(codeLength) {
+    const lowerBound = 10 ** (codeLength - 1);
+    const upperRange = 9 * lowerBound;
+    let roomCode;
+    do roomCode = String(Math.floor(lowerBound + Math.random() * upperRange));
+    while (await getRoom(roomCode));
+    return roomCode;
+}
+
+function createRoomState({ roomCode, hostProfile, guestProfile = null, roomTitle, visibility = 'public' }) {
+    const now = Date.now();
+    return {
+        matchId: crypto.randomUUID(),
+        code: roomCode,
+        roomTitle: safeRoomTitle(roomTitle, hostProfile.name),
+        visibility,
+        status: guestProfile ? 'setup' : 'waiting',
+        host: {
+            id: hostProfile.id,
+            name: hostProfile.name,
+            stats: hostProfile,
+            status: 'waiting',
+            lastActive: now,
+            disconnectSince: null
+        },
+        guest: guestProfile ? {
+            id: guestProfile.id,
+            name: guestProfile.name,
+            stats: guestProfile,
+            status: 'waiting',
+            lastActive: now,
+            disconnectSince: null
+        } : null,
+        currentTurn: 'host',
+        guesses: { host: [], guest: [] },
+        secrets: { host: [], guest: [] },
+        winner: '',
+        reason: '',
+        turnStartedAt: now,
+        startedAt: null,
+        finishedAt: null,
+        createdAt: now,
+        updatedAt: now,
+        expiresAt: now + (guestProfile ? SETUP_ROOM_TTL_MS : WAITING_ROOM_TTL_MS),
+        statsRecorded: false,
+        statsPromise: null
+    };
 }
 
 async function persistRoom(room) {
@@ -292,7 +342,7 @@ app.get('/api/health', asyncRoute(async (req, res) => {
     if (!dataStore || dataStoreError) {
         return res.status(503).json({
             ok: false,
-            service: 'homerunbaseball-v11',
+            service: 'homerunbaseball-v12',
             database: { connected: false, error: dataStoreError ? dataStoreError.message : 'DATABASE_URL missing' },
             authConfigured: auth.configured(),
             activeRooms: Object.keys(rooms).length,
@@ -302,7 +352,7 @@ app.get('/api/health', asyncRoute(async (req, res) => {
     const database = await dataStore.health();
     return res.json({
         ok: true,
-        service: 'homerunbaseball-v11',
+        service: 'homerunbaseball-v12',
         time: Date.now(),
         database,
         authConfigured: auth.configured(),
@@ -375,6 +425,91 @@ app.delete('/api/push/register', ...protectedApi, asyncRoute(async (req, res) =>
     return res.json({ success: true });
 }));
 
+app.post('/api/lobby/presence', ...protectedApi, asyncRoute(async (req, res) => {
+    await dataStore.ensurePlayer(req.user.id, req.body.name);
+    const hasChoice = typeof req.body.acceptingChallenges === 'boolean';
+    const presence = await dataStore.touchPresence(
+        req.user.id,
+        hasChoice ? req.body.acceptingChallenges : undefined
+    );
+    return res.json({ presence });
+}));
+
+app.get('/api/lobby', ...protectedApi, asyncRoute(async (req, res) => {
+    await dataStore.ensurePlayer(req.user.id, req.query.name);
+    await dataStore.touchPresence(req.user.id);
+    return res.json(await dataStore.getLobbyState(req.user.id));
+}));
+
+app.post('/api/challenges', ...protectedApi, asyncRoute(async (req, res) => {
+    const targetUserId = String(req.body.targetUserId || '');
+    const challenger = await dataStore.ensurePlayer(req.user.id, req.body.name);
+    const target = await dataStore.getPlayer(targetUserId);
+    if (!target) return res.status(404).json({ error: '대전 상대를 찾을 수 없습니다.' });
+
+    const challenge = await dataStore.createChallenge(req.user.id, targetUserId, Date.now() + CHALLENGE_TTL_MS);
+    challenge.challenger = challenger;
+    challenge.target = target;
+    res.json(challenge);
+    pushService.sendChallengeReceived(targetUserId, {
+        challengeId: challenge.id,
+        challengerName: challenger.name
+    }).catch(error => console.error('[PUSH] Challenge notification failed:', error.message));
+}));
+
+app.post('/api/challenges/:id/respond', ...protectedApi, asyncRoute(async (req, res) => {
+    const action = req.body.action;
+    if (!['accept', 'decline'].includes(action)) {
+        return res.status(400).json({ error: '수락 또는 거절을 선택해 주세요.' });
+    }
+
+    const lobby = await dataStore.getLobbyState(req.user.id);
+    const pending = lobby.challenge;
+    if (!pending || pending.id !== req.params.id || pending.direction !== 'incoming' || pending.status !== 'pending') {
+        return res.status(404).json({ error: '처리할 대전 신청을 찾을 수 없습니다.' });
+    }
+    if (action === 'decline') {
+        const challenge = await dataStore.respondToChallenge(req.params.id, req.user.id, action);
+        return res.json({ challenge });
+    }
+
+    const challengerRoom = await dataStore.findActiveRoom(pending.challengerId);
+    const targetRoom = await dataStore.findActiveRoom(pending.targetId);
+    if (challengerRoom || targetRoom) {
+        await dataStore.cancelChallenge(req.params.id);
+        return res.status(409).json({ error: '한쪽 사용자가 이미 다른 대전에 참여 중입니다.' });
+    }
+
+    await dataStore.respondToChallenge(req.params.id, req.user.id, action);
+    try {
+        const [challenger, target] = await Promise.all([
+            dataStore.getPlayer(pending.challengerId),
+            dataStore.getPlayer(pending.targetId)
+        ]);
+        if (!challenger || !target) throw new Error('대전 참가자 정보를 찾을 수 없습니다.');
+        const roomCode = await generateRoomCode(6);
+        const room = createRoomState({
+            roomCode,
+            hostProfile: challenger,
+            guestProfile: target,
+            roomTitle: `${challenger.name} vs ${target.name}`,
+            visibility: 'private'
+        });
+        rooms[roomCode] = room;
+        await persistRoom(room);
+        await dataStore.setChallengeRoom(req.params.id, roomCode);
+        pushService.sendChallengeAccepted(challenger.id, {
+            challengeId: req.params.id,
+            roomCode,
+            targetName: target.name
+        }).catch(error => console.error('[PUSH] Challenge acceptance notification failed:', error.message));
+        return res.json({ room: buildPublicRoomState(room, 'guest'), role: 'guest' });
+    } catch (error) {
+        await dataStore.cancelChallenge(req.params.id);
+        throw error;
+    }
+}));
+
 app.get('/api/me/active-room', ...protectedApi, asyncRoute(async (req, res) => {
     let room = Object.values(rooms)
         .filter(item => ['waiting', 'setup', 'playing'].includes(item.status))
@@ -398,43 +533,13 @@ app.post('/api/create', ...protectedApi, asyncRoute(async (req, res) => {
     if (previous) await removeRoom(previous.code);
 
     const visibility = req.body.visibility === 'private' ? 'private' : 'public';
-    const codeLength = visibility === 'private' ? 6 : 4;
-    const lowerBound = 10 ** (codeLength - 1);
-    const upperRange = 9 * lowerBound;
-    let roomCode;
-    do roomCode = String(Math.floor(lowerBound + Math.random() * upperRange));
-    while (await getRoom(roomCode));
-
-    const now = Date.now();
-    rooms[roomCode] = {
-        matchId: crypto.randomUUID(),
-        code: roomCode,
-        roomTitle: safeRoomTitle(req.body.roomTitle, profile.name),
-        visibility,
-        status: 'waiting',
-        host: {
-            id: req.user.id,
-            name: profile.name,
-            stats: profile,
-            status: 'waiting',
-            lastActive: now,
-            disconnectSince: null
-        },
-        guest: null,
-        currentTurn: 'host',
-        guesses: { host: [], guest: [] },
-        secrets: { host: [], guest: [] },
-        winner: '',
-        reason: '',
-        turnStartedAt: now,
-        startedAt: null,
-        finishedAt: null,
-        createdAt: now,
-        updatedAt: now,
-        expiresAt: now + WAITING_ROOM_TTL_MS,
-        statsRecorded: false,
-        statsPromise: null
-    };
+    const roomCode = await generateRoomCode(visibility === 'private' ? 6 : 4);
+    rooms[roomCode] = createRoomState({
+        roomCode,
+        hostProfile: profile,
+        roomTitle: req.body.roomTitle,
+        visibility
+    });
     await persistRoom(rooms[roomCode]);
     console.log(`[API] Room created: ${roomCode} by ${profile.name}`);
     res.json(buildPublicRoomState(rooms[roomCode], 'host'));
@@ -583,7 +688,7 @@ app.use((error, req, res, next) => {
 let httpServer = null;
 if (require.main === module) {
     httpServer = app.listen(PORT, () => {
-        console.log(`Home Run Baseball v6 server is running on port ${PORT}`);
+        console.log(`Home Run Baseball v12 server is running on port ${PORT}`);
     });
 }
 
@@ -603,7 +708,8 @@ module.exports = {
             HEARTBEAT_STALE_MS,
             DISCONNECT_GRACE_MS,
             WAITING_ROOM_TTL_MS,
-            SETUP_ROOM_TTL_MS
+            SETUP_ROOM_TTL_MS,
+            CHALLENGE_TTL_MS
         }
     }
 };

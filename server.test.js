@@ -10,6 +10,10 @@ const { createPostgresPoolOptions, MemoryStore } = require('./database');
 const HOST_ID = '11111111-1111-4111-8111-111111111111';
 const GUEST_ID = '22222222-2222-4222-8222-222222222222';
 const OUTSIDER_ID = '33333333-3333-4333-8333-333333333333';
+const CHALLENGER_ID = '44444444-4444-4444-8444-444444444444';
+const TARGET_ID = '55555555-5555-4555-8555-555555555555';
+const SECOND_CHALLENGER_ID = '66666666-6666-4666-8666-666666666666';
+const SECOND_TARGET_ID = '77777777-7777-4777-8777-777777777777';
 
 let server;
 let baseUrl;
@@ -53,6 +57,22 @@ test('deleting an anonymous player removes the profile and season record', async
     await store.deletePlayer('delete-me');
     assert.equal(await store.getPlayer('delete-me'), null);
     assert.equal((await store.listRankings()).some(player => player.id === 'delete-me'), false);
+});
+
+test('expired direct challenges cannot be accepted', async () => {
+    const store = new MemoryStore();
+    const challengerId = '88888888-8888-4888-8888-888888888888';
+    const targetId = '99999999-9999-4999-8999-999999999999';
+    await store.ensurePlayer(challengerId, '만료신청자');
+    await store.ensurePlayer(targetId, '만료수락자');
+    await store.touchPresence(targetId, true);
+    const challenge = await store.createChallenge(challengerId, targetId, Date.now() - 1);
+    const lobby = await store.getLobbyState(targetId);
+    assert.equal(lobby.challenge.status, 'expired');
+    await assert.rejects(
+        () => store.respondToChallenge(challenge.id, targetId, 'accept'),
+        /만료된/
+    );
 });
 
 async function request(route, options = {}, userId = HOST_ID) {
@@ -206,6 +226,85 @@ test('public rooms expose their custom title and can replace an unfinished waiti
     const publicRooms = await api('/api/rooms', {}, GUEST_ID);
     const listed = publicRooms.find(item => item.code === room.code);
     assert.equal(listed.roomTitle, room.roomTitle);
+});
+
+test('battle waiting lists an available player and acceptance puts both users in one private room', async () => {
+    await api('/api/me/bootstrap', {
+        method: 'POST', body: JSON.stringify({ name: '신청자' })
+    }, CHALLENGER_ID);
+    await api('/api/me/bootstrap', {
+        method: 'POST', body: JSON.stringify({ name: '수락자' })
+    }, TARGET_ID);
+    await api('/api/lobby/presence', {
+        method: 'POST', body: JSON.stringify({ acceptingChallenges: true, name: '수락자' })
+    }, TARGET_ID);
+
+    const lobby = await api('/api/lobby', {}, CHALLENGER_ID);
+    assert.equal(lobby.availablePlayers.some(player => player.id === TARGET_ID), true);
+    assert.equal(lobby.counts.available >= 1, true);
+
+    const challenge = await api('/api/challenges', {
+        method: 'POST', body: JSON.stringify({ targetUserId: TARGET_ID, name: '신청자' })
+    }, CHALLENGER_ID);
+    assert.equal(challenge.status, 'pending');
+    assert.equal(challenge.direction, 'outgoing');
+
+    const targetLobby = await api('/api/lobby', {}, TARGET_ID);
+    assert.equal(targetLobby.challenge.id, challenge.id);
+    assert.equal(targetLobby.challenge.direction, 'incoming');
+    assert.equal(targetLobby.challenge.challenger.name, '신청자');
+
+    const accepted = await api(`/api/challenges/${challenge.id}/respond`, {
+        method: 'POST', body: JSON.stringify({ action: 'accept' })
+    }, TARGET_ID);
+    assert.equal(accepted.role, 'guest');
+    assert.equal(accepted.room.status, 'setup');
+    assert.equal(accepted.room.visibility, 'private');
+    assert.equal(accepted.room.code.length, 6);
+
+    const hostActive = await api('/api/me/active-room', {}, CHALLENGER_ID);
+    assert.equal(hostActive.role, 'host');
+    assert.equal(hostActive.room.code, accepted.room.code);
+    const hostLobby = await api('/api/lobby', {}, CHALLENGER_ID);
+    assert.equal(hostLobby.challenge.status, 'accepted');
+    assert.equal(hostLobby.challenge.roomCode, accepted.room.code);
+
+    await api('/api/leave', {
+        method: 'POST', body: JSON.stringify({ room: accepted.room.code, role: 'guest' })
+    }, TARGET_ID);
+});
+
+test('a pending challenge blocks duplicate and crossed requests', async () => {
+    await api('/api/me/bootstrap', {
+        method: 'POST', body: JSON.stringify({ name: '두번째신청자' })
+    }, SECOND_CHALLENGER_ID);
+    await api('/api/me/bootstrap', {
+        method: 'POST', body: JSON.stringify({ name: '두번째수락자' })
+    }, SECOND_TARGET_ID);
+    await api('/api/lobby/presence', {
+        method: 'POST', body: JSON.stringify({ acceptingChallenges: true, name: '두번째수락자' })
+    }, SECOND_TARGET_ID);
+    await api('/api/lobby/presence', {
+        method: 'POST', body: JSON.stringify({ acceptingChallenges: true, name: '두번째신청자' })
+    }, SECOND_CHALLENGER_ID);
+    const challenge = await api('/api/challenges', {
+        method: 'POST', body: JSON.stringify({ targetUserId: SECOND_TARGET_ID, name: '두번째신청자' })
+    }, SECOND_CHALLENGER_ID);
+
+    const duplicate = await request('/api/challenges', {
+        method: 'POST', body: JSON.stringify({ targetUserId: SECOND_TARGET_ID, name: '두번째신청자' })
+    }, SECOND_CHALLENGER_ID);
+    assert.equal(duplicate.response.status, 409);
+
+    const crossed = await request('/api/challenges', {
+        method: 'POST', body: JSON.stringify({ targetUserId: SECOND_CHALLENGER_ID, name: '두번째수락자' })
+    }, SECOND_TARGET_ID);
+    assert.equal(crossed.response.status, 409);
+
+    const declined = await api(`/api/challenges/${challenge.id}/respond`, {
+        method: 'POST', body: JSON.stringify({ action: 'decline' })
+    }, SECOND_TARGET_ID);
+    assert.equal(declined.challenge.status, 'declined');
 });
 
 test('an expired waiting room cannot be joined', async () => {

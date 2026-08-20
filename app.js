@@ -65,6 +65,11 @@ let networkWarningActive = false;
 let lastWarnedTurnStartedAt = 0;
 let locallyRecordedRoomCode = '';
 let messageDialogResolver = null;
+let lobbyRefreshInFlight = false;
+let currentLobbyChallenge = null;
+let challengeCountdownInterval = null;
+let lastResolvedChallengeId = '';
+let lastAcceptedChallengeRoomCode = '';
 
 // DOM Screen Elements
 const screens = {
@@ -107,6 +112,10 @@ const messageModalText = document.getElementById('message-modal-text');
 const messageModalIcon = document.getElementById('message-modal-icon');
 const messageModalCancel = document.getElementById('message-modal-cancel');
 const messageModalConfirm = document.getElementById('message-modal-confirm');
+const challengeModal = document.getElementById('challenge-modal');
+const matchWaitingCheckbox = document.getElementById('match-waiting-checkbox');
+const availablePlayerList = document.getElementById('available-player-list');
+const outgoingChallengeStatus = document.getElementById('outgoing-challenge-status');
 
 // Result Modal Elements
 const resultBadge = document.getElementById('result-badge');
@@ -379,6 +388,10 @@ function registerPushToken(token) {
 
 window.onNativePushToken = token => registerPushToken(token);
 window.onNativeRoomInvite = () => restoreActiveRoom(true);
+window.onNativeChallengeInvite = () => {
+    showScreen('screen-lobby');
+    refreshLobbyNetwork();
+};
 
 function requestRoomNotificationPermission() {
     if (GameBridge && typeof GameBridge.enableRoomNotifications === 'function') {
@@ -505,6 +518,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 myPlayer.rate = 80.0;
                 updateLobbyStatsUI();
                 document.getElementById('lobby-profile-name').innerHTML = `${myPlayer.name} <i class="fa-solid fa-pen-to-square edit-icon" style="font-size: 0.8rem; margin-left: 5px; opacity: 0.6;"></i>`;
+                renderLobbyNetwork({
+                    counts: { online: 8, available: 3, playing: 4 },
+                    me: { acceptingChallenges: true, availableUntil: Date.now() + 60 * 60_000 },
+                    challenge: null,
+                    availablePlayers: [
+                        { id: 'preview-1', name: '홈런왕', wins: 9, losses: 4, rate: 69.2, online: true },
+                        { id: 'preview-2', name: '숫자마스터', wins: 5, losses: 2, rate: 71.4, online: false }
+                    ]
+                });
                 
                 const container = document.getElementById('public-rooms-list');
                 if (container) {
@@ -525,6 +547,19 @@ document.addEventListener('DOMContentLoaded', () => {
                         </div>
                     `;
                 }
+            } else if (screenshotParam === 'challenge') {
+                renderLobbyNetwork({
+                    counts: { online: 7, available: 2, playing: 4 },
+                    me: { acceptingChallenges: true, availableUntil: Date.now() + 60 * 60_000 },
+                    availablePlayers: [],
+                    challenge: {
+                        id: 'preview-challenge',
+                        direction: 'incoming',
+                        status: 'pending',
+                        expiresAt: Date.now() + 30_000,
+                        challenger: { name: '홈런왕', wins: 9, losses: 4, rate: 69.2 }
+                    }
+                });
             } else if (screenshotParam === 'game' || screenshotParam === 'game_horizontal') {
                 setTimeout(() => {
                     gameMode = 'solo';
@@ -650,7 +685,7 @@ function refreshPublicRooms() {
     if (window.isAutomatedTest) return; // skip in automated test
 
     apiFetch('/api/rooms')
-    .then(res => res.json())
+    .then(readApiResponse)
     .then(rooms => {
         const container = document.getElementById('public-rooms-list');
         if (!container) return;
@@ -714,6 +749,215 @@ function joinPublicRoom(code) {
         if (confirmed) autoJoinRoomFromUrl(code);
     });
 }
+
+function playerRecordText(player) {
+    const wins = Number(player && player.wins) || 0;
+    const losses = Number(player && player.losses) || 0;
+    const rate = Number(player && player.rate) || 0;
+    return `${wins}승 ${losses}패 · 승률 ${rate}%`;
+}
+
+function renderAvailablePlayers(players, hasPendingChallenge) {
+    if (!availablePlayerList) return;
+    if (!players || players.length === 0) {
+        availablePlayerList.innerHTML = '<div class="match-list-empty">대전 대기 중인 사용자가 없습니다.</div>';
+        return;
+    }
+
+    availablePlayerList.innerHTML = '';
+    players.forEach(player => {
+        const row = document.createElement('div');
+        row.className = 'available-player-row';
+        row.innerHTML = `
+            <i class="fa-solid fa-circle-user available-player-avatar"></i>
+            <div class="available-player-copy">
+                <strong>${escapeHtml(player.name)}</strong>
+                <span>${escapeHtml(playerRecordText(player))} · <span class="player-online-state">${player.online ? '접속 중' : '알림 대기'}</span></span>
+            </div>
+            <button type="button" class="challenge-player-btn" ${hasPendingChallenge ? 'disabled' : ''}>신청</button>
+        `;
+        row.querySelector('button').addEventListener('click', () => sendDirectChallenge(player.id, player.name));
+        availablePlayerList.appendChild(row);
+    });
+}
+
+function updateChallengeCountdown(challenge) {
+    if (challengeCountdownInterval) clearInterval(challengeCountdownInterval);
+    const update = () => {
+        const secondsEl = document.getElementById('challenge-expiry-seconds');
+        const seconds = Math.max(0, Math.ceil((Number(challenge.expiresAt) - Date.now()) / 1000));
+        if (secondsEl) secondsEl.textContent = seconds;
+        if (seconds <= 0) {
+            clearInterval(challengeCountdownInterval);
+            challengeCountdownInterval = null;
+            closeModal(challengeModal);
+            refreshLobbyNetwork();
+        }
+    };
+    update();
+    challengeCountdownInterval = setInterval(update, 250);
+}
+
+function showIncomingChallenge(challenge) {
+    if (!challengeModal || !challenge || challenge.status !== 'pending') return;
+    const opponent = challenge.challenger || {};
+    const name = document.getElementById('challenge-opponent-name');
+    const record = document.getElementById('challenge-opponent-record');
+    if (name) name.textContent = `${opponent.name || '상대방'}님의 신청`;
+    if (record) record.textContent = playerRecordText(opponent);
+    openModal(challengeModal);
+    updateChallengeCountdown(challenge);
+    GameBridge.vibrate('heavy');
+}
+
+function handleLobbyChallenge(challenge) {
+    currentLobbyChallenge = challenge || null;
+    const isPending = Boolean(challenge && challenge.status === 'pending');
+    if (outgoingChallengeStatus) {
+        const outgoing = isPending && challenge.direction === 'outgoing';
+        outgoingChallengeStatus.classList.toggle('hidden', !outgoing);
+        if (outgoing) {
+            const targetName = challenge.target && challenge.target.name ? challenge.target.name : '상대방';
+            const seconds = Math.max(0, Math.ceil((Number(challenge.expiresAt) - Date.now()) / 1000));
+            outgoingChallengeStatus.innerHTML = `<i class="fa-regular fa-clock"></i> ${escapeHtml(targetName)}님의 응답을 기다리는 중 · ${seconds}초`;
+        }
+    }
+
+    if (isPending && challenge.direction === 'incoming') {
+        showIncomingChallenge(challenge);
+        return;
+    }
+    if (challengeCountdownInterval) {
+        clearInterval(challengeCountdownInterval);
+        challengeCountdownInterval = null;
+    }
+    closeModal(challengeModal);
+
+    if (challenge && challenge.status === 'accepted' && challenge.roomCode) {
+        if (lastAcceptedChallengeRoomCode !== challenge.roomCode) {
+            lastAcceptedChallengeRoomCode = challenge.roomCode;
+            restoreActiveRoom(true);
+        }
+        return;
+    }
+
+    if (challenge && challenge.direction === 'outgoing'
+        && ['declined', 'expired', 'cancelled'].includes(challenge.status)
+        && lastResolvedChallengeId !== `${challenge.id}:${challenge.status}`) {
+        lastResolvedChallengeId = `${challenge.id}:${challenge.status}`;
+        const messages = {
+            declined: '상대방이 대전 신청을 거절했습니다.',
+            expired: '대전 신청 응답 시간이 지났습니다.',
+            cancelled: '상대방이 다른 대전에 참여해 신청이 취소되었습니다.'
+        };
+        showToast(messages[challenge.status], 'info', 4200);
+    }
+}
+
+function renderLobbyNetwork(data) {
+    const counts = data.counts || {};
+    const onlineEl = document.getElementById('presence-online');
+    const availableEl = document.getElementById('presence-available');
+    const playingEl = document.getElementById('presence-playing');
+    if (onlineEl) onlineEl.textContent = Number(counts.online) || 0;
+    if (availableEl) availableEl.textContent = Number(counts.available) || 0;
+    if (playingEl) playingEl.textContent = Number(counts.playing) || 0;
+
+    const accepting = Boolean(data.me && data.me.acceptingChallenges);
+    if (matchWaitingCheckbox) matchWaitingCheckbox.checked = accepting;
+    const waitingStatus = document.getElementById('match-waiting-status');
+    if (waitingStatus) {
+        waitingStatus.textContent = accepting
+            ? '최대 1시간 동안 대전 신청과 알림을 받습니다.'
+            : '대전 대기를 켜면 신청을 받을 수 있습니다.';
+    }
+    handleLobbyChallenge(data.challenge);
+    renderAvailablePlayers(data.availablePlayers, Boolean(data.challenge && data.challenge.status === 'pending'));
+}
+
+function refreshLobbyNetwork() {
+    if (window.isAutomatedTest || lobbyRefreshInFlight || currentScreen !== 'screen-lobby') return Promise.resolve();
+    lobbyRefreshInFlight = true;
+    return apiFetch(`/api/lobby?name=${encodeURIComponent(myPlayer.name || '')}`)
+        .then(readApiResponse)
+        .then(renderLobbyNetwork)
+        .catch(error => console.warn('Lobby presence refresh failed:', error.message))
+        .finally(() => { lobbyRefreshInFlight = false; });
+}
+
+function sendDirectChallenge(targetUserId, targetName) {
+    if (currentLobbyChallenge && currentLobbyChallenge.status === 'pending') return;
+    apiFetch('/api/challenges', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetUserId, name: myPlayer.name })
+    })
+        .then(readApiResponse)
+        .then(challenge => {
+            currentLobbyChallenge = challenge;
+            showToast(`${targetName}님에게 대전을 신청했습니다.`, 'success');
+            refreshLobbyNetwork();
+        })
+        .catch(error => showToast(error.message, 'warning', 4200));
+}
+
+function respondToDirectChallenge(action) {
+    const challenge = currentLobbyChallenge;
+    if (!challenge || challenge.direction !== 'incoming' || challenge.status !== 'pending') return;
+    const acceptButton = document.getElementById('btn-accept-challenge');
+    const declineButton = document.getElementById('btn-decline-challenge');
+    if (acceptButton) acceptButton.disabled = true;
+    if (declineButton) declineButton.disabled = true;
+
+    apiFetch(`/api/challenges/${encodeURIComponent(challenge.id)}/respond`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action })
+    })
+        .then(readApiResponse)
+        .then(result => {
+            closeModal(challengeModal);
+            if (action === 'accept' && result.room) {
+                applyRestoredRoom(result.room, result.role || 'guest');
+                showToast('대전 신청을 수락했습니다.', 'success');
+            } else {
+                currentLobbyChallenge = null;
+                showToast('대전 신청을 거절했습니다.', 'info');
+                refreshLobbyNetwork();
+            }
+        })
+        .catch(error => {
+            showToast(error.message, 'warning', 4200);
+            refreshLobbyNetwork();
+        })
+        .finally(() => {
+            if (acceptButton) acceptButton.disabled = false;
+            if (declineButton) declineButton.disabled = false;
+        });
+}
+
+safeAddListener(matchWaitingCheckbox, 'change', () => {
+    const acceptingChallenges = Boolean(matchWaitingCheckbox.checked);
+    matchWaitingCheckbox.disabled = true;
+    if (acceptingChallenges) requestRoomNotificationPermission();
+    apiFetch('/api/lobby/presence', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ acceptingChallenges, name: myPlayer.name })
+    })
+        .then(readApiResponse)
+        .then(() => {
+            showToast(acceptingChallenges ? '1시간 동안 대전 대기를 시작합니다.' : '대전 대기를 종료했습니다.', 'success');
+            refreshLobbyNetwork();
+        })
+        .catch(error => {
+            matchWaitingCheckbox.checked = !acceptingChallenges;
+            showToast(error.message, 'warning');
+        })
+        .finally(() => { matchWaitingCheckbox.disabled = false; });
+});
+safeAddListener('btn-accept-challenge', 'click', () => respondToDirectChallenge('accept'));
+safeAddListener('btn-decline-challenge', 'click', () => respondToDirectChallenge('decline'));
 
 function escapeHtml(value) {
     return String(value == null ? '' : value).replace(/[&<>"']/g, character => ({
@@ -927,6 +1171,7 @@ function showScreen(screenId) {
     closeModal(resultModal);
     closeModal(createRoomModal);
     closeModal(joinModal);
+    closeModal(challengeModal);
     if (messageModal && !messageModal.classList.contains('hidden')) {
         closeMessageDialog(false);
     }
@@ -934,8 +1179,12 @@ function showScreen(screenId) {
     // Manage Public Rooms list polling interval
     if (screenId === 'screen-lobby') {
         refreshPublicRooms();
+        refreshLobbyNetwork();
         if (!lobbyInterval) {
-            lobbyInterval = setInterval(refreshPublicRooms, 3000);
+            lobbyInterval = setInterval(() => {
+                refreshPublicRooms();
+                refreshLobbyNetwork();
+            }, 3000);
         }
     } else {
         if (lobbyInterval) {
