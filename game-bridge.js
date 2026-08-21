@@ -8,20 +8,33 @@
     let pushTokenResolver = null;
     let pushTokenTimer = null;
 
+    function readCachedProfile() {
+        try {
+            const cachedUser = localStorage.getItem(STORAGE_KEY_USER);
+            if (!cachedUser) return null;
+            const profile = JSON.parse(cachedUser);
+            if (!profile || typeof profile !== 'object' || !String(profile.name || '').trim()) return null;
+            return profile;
+        } catch (error) {
+            console.warn('Could not read cached user profile:', error);
+            try {
+                localStorage.removeItem(STORAGE_KEY_USER);
+            } catch (storageError) {}
+            return null;
+        }
+    }
+
     const GameBridge = {
         isNative: Boolean(window.AndroidGame),
 
+        getCachedProfile: function () {
+            return readCachedProfile();
+        },
+
         getProfile: function () {
             return window.AuthClient.ensureSession().then(session => new Promise((resolve) => {
-                let cachedUser = null;
-                try {
-                    cachedUser = localStorage.getItem(STORAGE_KEY_USER);
-                } catch (e) {
-                    console.warn("Storage access restricted:", e);
-                }
-
-                if (cachedUser) {
-                    const profile = JSON.parse(cachedUser);
+                const profile = readCachedProfile();
+                if (profile) {
                     profile.id = session.user.id;
                     try {
                         localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(profile));

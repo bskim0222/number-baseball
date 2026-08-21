@@ -5,6 +5,9 @@
 (function () {
     const STORAGE_KEY = 'homerun_baseball_supabase_session_v1';
     const DEV_USER_KEY = 'homerun_baseball_dev_user_v1';
+    const AUTH_REQUEST_TIMEOUT_MS = 8_000;
+    const AUTH_REQUEST_RETRY_DELAY_MS = 700;
+    let sessionRequest = null;
 
     function config() {
         return {
@@ -53,17 +56,55 @@
         };
     }
 
+    function fetchWithTimeout(url, options, timeoutMs) {
+        return new Promise((resolve, reject) => {
+            let completed = false;
+            const timer = window.setTimeout(() => {
+                if (completed) return;
+                completed = true;
+                reject(new Error('인증 서버 응답 시간이 초과되었습니다.'));
+            }, timeoutMs);
+
+            fetch(url, options).then(response => {
+                if (completed) return;
+                completed = true;
+                window.clearTimeout(timer);
+                resolve(response);
+            }).catch(error => {
+                if (completed) return;
+                completed = true;
+                window.clearTimeout(timer);
+                reject(error);
+            });
+        });
+    }
+
+    function delay(ms) {
+        return new Promise(resolve => window.setTimeout(resolve, ms));
+    }
+
     async function supabaseRequest(path, options = {}) {
         const { url, key } = config();
         if (!url || !key) throw new Error('Supabase 인증 설정이 필요합니다.');
-        const response = await fetch(`${url}/auth/v1${path}`, {
-            ...options,
-            headers: {
-                apikey: key,
-                'Content-Type': 'application/json',
-                ...(options.headers || {})
+        let response = null;
+        let networkError = null;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            try {
+                response = await fetchWithTimeout(`${url}/auth/v1${path}`, {
+                    ...options,
+                    headers: {
+                        apikey: key,
+                        'Content-Type': 'application/json',
+                        ...(options.headers || {})
+                    }
+                }, AUTH_REQUEST_TIMEOUT_MS);
+                break;
+            } catch (error) {
+                networkError = error;
+                if (attempt === 0) await delay(AUTH_REQUEST_RETRY_DELAY_MS);
             }
-        });
+        }
+        if (!response) throw networkError || new Error('인증 서버에 연결하지 못했습니다.');
         const text = await response.text();
         let body = {};
         try {
@@ -113,7 +154,7 @@
         return { access_token: 'development', refresh_token: '', expires_at: 4102444800, user: { id, is_anonymous: true }, development: true };
     }
 
-    async function ensureSession(forceRefresh = false) {
+    async function resolveSession(forceRefresh = false) {
         const { url, key } = config();
         const screenshotMode = new URLSearchParams(window.location.search).has('screenshot');
         if ((!url || !key) && (window.HOMERUN_ALLOW_DEV_AUTH === true || window.isAutomatedTest || screenshotMode)) {
@@ -134,6 +175,16 @@
             }
         }
         return createAnonymousSession();
+    }
+
+    function ensureSession(forceRefresh = false) {
+        if (forceRefresh) return resolveSession(true);
+        if (!sessionRequest) {
+            sessionRequest = resolveSession(false).finally(() => {
+                sessionRequest = null;
+            });
+        }
+        return sessionRequest;
     }
 
     async function authorizedFetch(url, options = {}) {

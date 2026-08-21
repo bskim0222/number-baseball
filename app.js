@@ -481,7 +481,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }, 900);
 
-        // 1. Initialize Profile
+    // 1. Show the saved nickname immediately while authentication reconnects.
+    const cachedProfile = GameBridge.getCachedProfile();
+    if (cachedProfile) {
+        mergePlayerProfile(cachedProfile);
+        updateLobbyProfileName();
+        updateMyNameDisplays();
+        updateLobbyStatsUI();
+    }
+
+    // 1. Initialize Profile
     GameBridge.getProfile().then(profile => {
         mergePlayerProfile(profile);
         const localStats = loadLocalStatsBackup();
@@ -606,11 +615,13 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
     }).catch(error => {
-        mergePlayerProfile({ name: '게스트', id: 'AUTH-PENDING' });
+        const fallbackProfile = GameBridge.getCachedProfile();
+        mergePlayerProfile(fallbackProfile || { name: '연결 확인 필요', id: 'AUTH-PENDING' });
         updateLobbyProfileName();
         updateMyNameDisplays();
         updateLobbyStatsUI();
-        showToast(`1:1 인증 준비가 필요합니다: ${error.message}`, 'warning', 6000);
+        showToast('계정 연결이 지연되고 있습니다. 앱을 다시 실행해 주세요.', 'warning', 7000);
+        console.warn('Profile authentication failed:', error);
     });
 
     // 2. Setup Profile Nickname Modifier
