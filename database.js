@@ -1,9 +1,19 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-function safePlayerName(value) {
+function defaultPlayerName(id) {
+    const suffix = String(id || '').replace(/[^a-z0-9]/gi, '').slice(-4).toUpperCase();
+    return `야구유저${suffix}`.slice(0, 12);
+}
+
+function isPlaceholderPlayerName(value) {
+    const compact = typeof value === 'string' ? value.trim().replace(/\s+/g, '') : '';
+    return !compact || compact === '로딩중...' || compact === '로딩중…' || compact === '연결확인필요';
+}
+
+function safePlayerName(value, id) {
     const name = typeof value === 'string' ? value.trim().slice(0, 12) : '';
-    return name || '야구유저';
+    return isPlaceholderPlayerName(name) ? defaultPlayerName(id) : name;
 }
 
 function calculateRate(wins, losses) {
@@ -16,7 +26,7 @@ function publicPlayer(record) {
     const losses = Number(record.losses) || 0;
     return {
         id: String(record.id || record.player_id),
-        name: safePlayerName(record.name || record.nickname),
+        name: safePlayerName(record.name || record.nickname, record.id || record.player_id),
         wins,
         losses,
         games: wins + losses,
@@ -76,8 +86,8 @@ class MemoryStore {
     }
 
     async ensurePlayer(id, name) {
-        const current = this.players.get(id) || { id, name: safePlayerName(name), deleted: false };
-        current.name = safePlayerName(name || current.name);
+        const current = this.players.get(id) || { id, name: safePlayerName(name, id), deleted: false };
+        current.name = safePlayerName(name || current.name, id);
         current.deleted = false;
         this.players.set(id, current);
         if (!this.stats.has(id)) this.stats.set(id, { wins: 0, losses: 0 });
@@ -94,7 +104,7 @@ class MemoryStore {
     async updateName(id, name) {
         const player = this.players.get(id);
         if (!player || player.deleted) return this.ensurePlayer(id, name);
-        player.name = safePlayerName(name);
+        player.name = safePlayerName(name, id);
         return this.getPlayer(id);
     }
 
@@ -394,7 +404,7 @@ class PostgresStore {
     }
 
     async ensurePlayer(id, name) {
-        const nickname = safePlayerName(name);
+        const nickname = safePlayerName(name, id);
         await this.pool.query(
             `insert into hb_players (id, nickname) values ($1, $2)
              on conflict (id) do update set
@@ -427,7 +437,7 @@ class PostgresStore {
     async updateName(id, name) {
         await this.pool.query(
             'update hb_players set nickname = $2, updated_at = now() where id = $1 and deleted_at is null',
-            [id, safePlayerName(name)]
+            [id, safePlayerName(name, id)]
         );
         return this.getPlayer(id);
     }
@@ -461,7 +471,7 @@ class PostgresStore {
                 await client.query(
                     `insert into hb_players (id, nickname) values ($1, $2)
                      on conflict (id) do update set nickname = excluded.nickname, updated_at = now()`,
-                    [player.id, safePlayerName(player.name)]
+                    [player.id, safePlayerName(player.name, player.id)]
                 );
                 await client.query(
                     `insert into hb_player_season_stats (player_id, season_id)

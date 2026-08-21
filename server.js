@@ -373,7 +373,7 @@ app.get('/api/me', ...protectedApi, asyncRoute(async (req, res) => {
 }));
 
 app.patch('/api/me', ...protectedApi, asyncRoute(async (req, res) => {
-    const name = safePlayerName(req.body.name);
+    const name = safePlayerName(req.body.name, req.user.id);
     const player = await dataStore.updateName(req.user.id, name);
     res.json({ player });
 }));

@@ -18,6 +18,12 @@ create table if not exists hb_players (
     deleted_at timestamptz
 );
 
+-- Repair a legacy client placeholder that was accidentally stored as a nickname.
+update hb_players
+set nickname = left('야구유저' || upper(right(replace(id::text, '-', ''), 4)), 12),
+    updated_at = now()
+where regexp_replace(trim(nickname), '\s+', '', 'g') in ('로딩중...', '로딩중…');
+
 create table if not exists hb_player_season_stats (
     player_id uuid not null references hb_players(id),
     season_id bigint not null references hb_seasons(id),

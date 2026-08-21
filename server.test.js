@@ -5,7 +5,7 @@ process.env.NODE_ENV = 'test';
 process.env.ADMIN_API_TOKEN = 'test-admin-token';
 
 const { app, _internals } = require('./server');
-const { createPostgresPoolOptions, MemoryStore } = require('./database');
+const { createPostgresPoolOptions, MemoryStore, safePlayerName } = require('./database');
 
 const HOST_ID = '11111111-1111-4111-8111-111111111111';
 const GUEST_ID = '22222222-2222-4222-8222-222222222222';
@@ -26,6 +26,13 @@ test('Postgres connection verifies the Supabase CA and pooler hostname', () => {
     assert.equal(options.ssl.servername, 'aws-0-ap-southeast-1.pooler.supabase.com');
     assert.match(options.ssl.ca, /BEGIN CERTIFICATE/);
     assert.equal(options.connectionString.includes('sslmode='), false);
+});
+
+test('legacy loading placeholders become stable account-specific nicknames', async () => {
+    assert.equal(safePlayerName('로딩 중...', HOST_ID), '야구유저1111');
+    const store = new MemoryStore();
+    const player = await store.ensurePlayer(HOST_ID, '로딩 중...');
+    assert.equal(player.name, '야구유저1111');
 });
 
 test('rankings use wins, win rate, and fewer losses without a score', async () => {
