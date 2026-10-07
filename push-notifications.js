@@ -38,6 +38,14 @@ function createPushService(options = {}) {
 
     async function sendNotification(userId, payload) {
         if (!configured || !messaging || !dataStore) return { sent: 0, skipped: true };
+        if (options.getSettings) {
+            const settings = await options.getSettings(userId);
+            const allowed = payload.data.type === 'room_joined'
+                ? settings.roomNotifications
+                : settings.inviteNotifications && (payload.data.type !== 'challenge_received' || settings.acceptChallenges);
+            if (!allowed) return { sent: 0, skipped: true };
+        }
+        if (payload.expiresAt && payload.expiresAt <= Date.now()) return { sent: 0, skipped: true };
 
         const tokens = await dataStore.getPushTokens(userId);
         if (!tokens.length) return { sent: 0, skipped: true };
@@ -48,6 +56,7 @@ function createPushService(options = {}) {
             data: Object.fromEntries(Object.entries(payload.data || {}).map(([key, value]) => [key, String(value)])),
             android: {
                 priority: 'high',
+                ttl: payload.expiresAt ? Math.max(0, payload.expiresAt - Date.now()) : 120000,
                 notification: {
                     channelId: 'match_alerts',
                     sound: 'default',
@@ -85,7 +94,8 @@ function createPushService(options = {}) {
                 title: '새 대전 신청',
                 body: `${challenge.challengerName}님이 1:1 대전을 신청했습니다.`
             },
-            data: { type: 'challenge_received', challengeId: challenge.challengeId },
+            data: { type: 'challenge_received', challengeId: challenge.challengeId, kind: challenge.kind || 'direct', expiresAt: challenge.expiresAt || Date.now() + 30000 },
+            expiresAt: challenge.expiresAt,
             tag: `challenge-${challenge.challengeId}`
         });
     }

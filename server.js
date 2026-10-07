@@ -5,6 +5,7 @@ const cors = require('cors');
 const { createAuth } = require('./auth');
 const { createDataStore, safePlayerName } = require('./database');
 const { createPushService } = require('./push-notifications');
+const { Matchmaking } = require('./matchmaking');
 
 const app = express();
 const PORT = process.env.PORT || 8000;
@@ -40,7 +41,11 @@ const dataStoreReady = dataStore
         console.error('Database initialization failed:', error.message);
     })
     : Promise.resolve();
-const pushService = createPushService({ dataStore });
+const matchmaking = dataStore ? new Matchmaking(dataStore) : null;
+const pushService = createPushService({ dataStore, getSettings: id => matchmaking.getSettings(id) });
+function matchRoute(handler) {
+    return asyncRoute((req, res) => matchmaking.exclusive(() => handler(req, res)));
+}
 
 function safeRoomTitle(value, hostName) {
     const title = typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').slice(0, 20) : '';
@@ -386,10 +391,11 @@ app.delete('/api/me/record', ...protectedApi, asyncRoute(async (req, res) => {
     return res.json({ success: true, player });
 }));
 
-app.delete('/api/me', ...protectedApi, asyncRoute(async (req, res) => {
+app.delete('/api/me', ...protectedApi, matchRoute(async (req, res) => {
     if (req.body.confirmation !== 'DELETE') {
         return res.status(400).json({ error: '계정 삭제 확인 값이 필요합니다.' });
     }
+    await matchmaking.deletePlayer(req.user.id);
     await dataStore.deletePlayer(req.user.id);
     await auth.deleteAuthUser(req.user.id);
     return res.json({ success: true });
@@ -425,9 +431,59 @@ app.delete('/api/push/register', ...protectedApi, asyncRoute(async (req, res) =>
     return res.json({ success: true });
 }));
 
-app.post('/api/lobby/presence', ...protectedApi, asyncRoute(async (req, res) => {
+app.get('/api/me/settings', ...protectedApi, asyncRoute(async (req, res) => {
+    res.json(await matchmaking.getSettings(req.user.id));
+}));
+
+app.post('/api/lobby/activity', ...protectedApi, matchRoute(async (req, res) => {
+    await matchmaking.setActivity(req.user.id, req.body.activity);
+    res.json({ success: true });
+}));
+
+app.patch('/api/me/settings', ...protectedApi, matchRoute(async (req, res) => {
+    if (!await dataStore.getPlayer(req.user.id)) await dataStore.ensurePlayer(req.user.id);
+    res.json(await matchmaking.saveSettings(req.user.id, req.body));
+}));
+
+app.post('/api/random-match', ...protectedApi, matchRoute(async (req, res) => {
+    const challenger = await dataStore.ensurePlayer(req.user.id, req.body.name);
+    await matchmaking.saveSettings(req.user.id, {}, true);
+    const previous = await matchmaking.current(req.user.id);
+    const search = await matchmaking.start(req.user.id);
+    res.json(await matchmaking.publicSearch(search, req.user.id));
+    if (previous?.id !== search.id) {
+        for (const id of Object.keys(search.recipients)) {
+            pushService.sendChallengeReceived(id, {
+                challengeId: search.id, challengerName: challenger.name,
+                kind: 'random', expiresAt: search.expiresAt
+            }).catch(error => console.error('[PUSH] Random invite failed:', error.message));
+        }
+    }
+}));
+
+app.post('/api/random-match/:id/cancel', ...protectedApi, matchRoute(async (req, res) => {
+    res.json(await matchmaking.cancel(req.user.id, req.params.id));
+}));
+
+app.post('/api/random-match/:id/respond', ...protectedApi, matchRoute(async (req, res) => {
+    const result = await matchmaking.respond(req.user.id, req.params.id, req.body.action, async (host, guest) => {
+        return createRoomState({ roomCode: await generateRoomCode(6), hostProfile: host, guestProfile: guest,
+            roomTitle: `${host.name} vs ${guest.name}`, visibility: 'private' });
+    });
+    if (!result.room) return res.json(result);
+    rooms[result.room.code] = result.room;
+    return res.json({ room: buildPublicRoomState(result.room, 'guest'), role: 'guest' });
+}));
+
+app.post('/api/lobby/presence', ...protectedApi, matchRoute(async (req, res) => {
     await dataStore.ensurePlayer(req.user.id, req.body.name);
     const hasChoice = typeof req.body.acceptingChallenges === 'boolean';
+    if (hasChoice) {
+        const settings = await matchmaking.getSettings(req.user.id);
+        const patch = { acceptChallenges: req.body.acceptingChallenges };
+        if (!settings.supportsRandom && req.body.settingsVersion !== 1) patch.inviteNotifications = req.body.acceptingChallenges;
+        await matchmaking.saveSettings(req.user.id, patch);
+    }
     const presence = await dataStore.touchPresence(
         req.user.id,
         hasChoice ? req.body.acceptingChallenges : undefined
@@ -435,17 +491,38 @@ app.post('/api/lobby/presence', ...protectedApi, asyncRoute(async (req, res) => 
     return res.json({ presence });
 }));
 
-app.get('/api/lobby', ...protectedApi, asyncRoute(async (req, res) => {
+app.get('/api/lobby', ...protectedApi, matchRoute(async (req, res) => {
     await dataStore.ensurePlayer(req.user.id, req.query.name);
-    await dataStore.touchPresence(req.user.id);
-    return res.json(await dataStore.getLobbyState(req.user.id));
+    const supportsRandom = req.query.matchmaking === '1';
+    let settings = await matchmaking.getSettings(req.user.id);
+    if (supportsRandom && !settings.supportsRandom) settings = await matchmaking.saveSettings(req.user.id, {}, true);
+    if (supportsRandom && settings.activity !== 'lobby') {
+        await matchmaking.setActivity(req.user.id, 'lobby');
+        settings.activity = 'lobby';
+    }
+    await dataStore.touchPresence(req.user.id, supportsRandom ? settings.acceptChallenges : undefined);
+    const lobby = await dataStore.getLobbyState(req.user.id);
+    lobby.settings = settings;
+    lobby.randomMatch = await matchmaking.current(req.user.id, supportsRandom);
+    const eligible = await matchmaking.filterLobbyPlayers(lobby.availablePlayers);
+    lobby.availablePlayers = eligible;
+    const hasPending = lobby.randomMatch?.status === 'pending' || lobby.challenge?.status === 'pending';
+    lobby.counts.available = eligible.length + (settings.acceptChallenges && lobby.me.acceptingChallenges && !hasPending ? 1 : 0);
+    if (!settings.acceptChallenges) lobby.me.acceptingChallenges = false;
+    return res.json(lobby);
 }));
 
-app.post('/api/challenges', ...protectedApi, asyncRoute(async (req, res) => {
+app.post('/api/challenges', ...protectedApi, matchRoute(async (req, res) => {
     const targetUserId = String(req.body.targetUserId || '');
     const challenger = await dataStore.ensurePlayer(req.user.id, req.body.name);
     const target = await dataStore.getPlayer(targetUserId);
     if (!target) return res.status(404).json({ error: '대전 상대를 찾을 수 없습니다.' });
+    await matchmaking.assertNotSearching(req.user.id);
+    await matchmaking.assertNotSearching(targetUserId);
+    const presence = (await matchmaking.presence()).find(player => player.id === targetUserId);
+    if (!await matchmaking.canReceive(targetUserId, presence && Date.now() - presence.lastSeen <= 45000)) {
+        return res.status(409).json({ error: '상대방이 대전 신청을 받지 않습니다.' });
+    }
 
     const challenge = await dataStore.createChallenge(req.user.id, targetUserId, Date.now() + CHALLENGE_TTL_MS);
     challenge.challenger = challenger;
@@ -453,11 +530,12 @@ app.post('/api/challenges', ...protectedApi, asyncRoute(async (req, res) => {
     res.json(challenge);
     pushService.sendChallengeReceived(targetUserId, {
         challengeId: challenge.id,
-        challengerName: challenger.name
+        challengerName: challenger.name,
+        expiresAt: challenge.expiresAt
     }).catch(error => console.error('[PUSH] Challenge notification failed:', error.message));
 }));
 
-app.post('/api/challenges/:id/respond', ...protectedApi, asyncRoute(async (req, res) => {
+app.post('/api/challenges/:id/respond', ...protectedApi, matchRoute(async (req, res) => {
     const action = req.body.action;
     if (!['accept', 'decline'].includes(action)) {
         return res.status(400).json({ error: '수락 또는 거절을 선택해 주세요.' });
@@ -471,6 +549,9 @@ app.post('/api/challenges/:id/respond', ...protectedApi, asyncRoute(async (req, 
     if (action === 'decline') {
         const challenge = await dataStore.respondToChallenge(req.params.id, req.user.id, action);
         return res.json({ challenge });
+    }
+    if (!(await matchmaking.getSettings(req.user.id)).acceptChallenges) {
+        return res.status(409).json({ error: '대전 신청 받기가 꺼져 있습니다.' });
     }
 
     const challengerRoom = await dataStore.findActiveRoom(pending.challengerId);
@@ -524,7 +605,8 @@ app.get('/api/me/active-room', ...protectedApi, asyncRoute(async (req, res) => {
     return res.json({ room: buildPublicRoomState(room, role), role });
 }));
 
-app.post('/api/create', ...protectedApi, asyncRoute(async (req, res) => {
+app.post('/api/create', ...protectedApi, matchRoute(async (req, res) => {
+    await matchmaking.assertNotSearching(req.user.id);
     const profile = await dataStore.ensurePlayer(req.user.id, req.body.hostName);
     const previous = await dataStore.findActiveRoom(req.user.id);
     if (previous && previous.status === 'playing') {
@@ -545,8 +627,10 @@ app.post('/api/create', ...protectedApi, asyncRoute(async (req, res) => {
     res.json(buildPublicRoomState(rooms[roomCode], 'host'));
 }));
 
-app.post('/api/join', ...protectedApi, asyncRoute(async (req, res) => {
-    const room = await getRoom(req.body.room);
+app.post('/api/join', ...protectedApi, matchRoute(async (req, res) => {
+    await matchmaking.assertNotSearching(req.user.id);
+    if (await dataStore.findActiveRoom(req.user.id)) return res.status(409).json({ error: '참여 중인 방을 먼저 나가 주세요.' });
+    const room = await getRoom(req.body.room) && await dataStore.getRoom(req.body.room);
     if (!room) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
     if (room.status !== 'waiting') return res.status(400).json({ error: '이미 게임이 진행 중이거나 가득 찬 방입니다.' });
     if (req.user.id === room.host.id) return res.status(400).json({ error: '같은 계정으로 만든 방에는 참가할 수 없습니다.' });
@@ -566,6 +650,7 @@ app.post('/api/join', ...protectedApi, asyncRoute(async (req, res) => {
     touchPlayer(room, 'host', now);
     touchPlayer(room, 'guest', now);
     await persistRoom(room);
+    rooms[room.code] = room;
     console.log(`[API] Player joined: ${profile.name} entered room ${room.code}`);
     res.json(buildPublicRoomState(room, 'guest'));
     pushService.sendRoomJoined(room.host.id, {

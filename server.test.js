@@ -82,6 +82,37 @@ test('expired direct challenges cannot be accepted', async () => {
     );
 });
 
+test('random match HTTP flow preserves settings, rejects competing actions and restores both players', async () => {
+    const users = Array.from({ length: 4 }, (_, i) => `a000000${i}-0000-4000-8000-000000000000`);
+    for (const id of users) await api('/api/lobby?matchmaking=1&name=랜덤선수', {}, id);
+    const settings = await api('/api/me/settings', { method: 'PATCH', body: JSON.stringify({ roomNotifications: false }) }, users[0]);
+    assert.equal(settings.acceptChallenges, true);
+    assert.equal(settings.roomNotifications, false);
+    assert.equal((await api('/api/me', {}, users[0])).player.name, '랜덤선수');
+    const search = await api('/api/random-match', { method: 'POST', body: '{}' }, users[0]);
+    assert.equal(search.invitedCount, 3);
+    const blocked = await request('/api/create', { method: 'POST', body: '{}' }, users[0]);
+    assert.equal(blocked.response.status, 409);
+    for (const id of users.slice(1)) {
+        const lobby = await api('/api/lobby?matchmaking=1', {}, id);
+        assert.equal(lobby.randomMatch.id, search.id);
+    }
+    const results = await Promise.all(users.slice(1).map(id => request(`/api/random-match/${search.id}/respond`, {
+        method: 'POST', body: JSON.stringify({ action: 'accept' })
+    }, id)));
+    assert.equal(results.filter(result => result.response.ok).length, 1);
+    assert.equal(results.filter(result => result.response.status === 409).length, 2);
+    const room = results.find(result => result.response.ok).body.room;
+    assert.equal((await api('/api/me/active-room', {}, users[0])).room.code, room.code);
+    const winner = users[1 + results.findIndex(result => result.response.ok)];
+    assert.equal((await api('/api/me/active-room', {}, winner)).room.code, room.code);
+    for (const id of users.slice(1).filter(id => id !== winner)) {
+        const state = (await api('/api/lobby?matchmaking=1', {}, id)).randomMatch;
+        assert.equal(state.status, 'matched_elsewhere');
+        assert.equal(state.roomCode, null);
+    }
+});
+
 async function request(route, options = {}, userId = HOST_ID) {
     const response = await fetch(`${baseUrl}${route}`, {
         ...options,

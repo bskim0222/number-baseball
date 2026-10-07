@@ -111,6 +111,23 @@ create index if not exists hb_match_challenges_challenger_idx on hb_match_challe
 create index if not exists hb_match_challenges_target_idx on hb_match_challenges (target_id, updated_at desc);
 create index if not exists hb_match_challenges_status_idx on hb_match_challenges (status, expires_at);
 
+create table if not exists hb_match_settings (
+    player_id uuid primary key references hb_players(id) on delete cascade,
+    settings jsonb not null default '{}'::jsonb
+);
+create table if not exists hb_random_searches (
+    id uuid primary key,
+    challenger_id uuid not null references hb_players(id) on delete cascade,
+    status varchar(12) not null check (status in ('pending', 'accepted', 'declined', 'expired', 'cancelled')),
+    state jsonb not null,
+    updated_at timestamptz not null default now()
+);
+create index if not exists hb_random_searches_status_idx on hb_random_searches (status, updated_at);
+alter table hb_match_settings enable row level security;
+alter table hb_random_searches enable row level security;
+revoke all on hb_match_settings from anon, authenticated;
+revoke all on hb_random_searches from anon, authenticated;
+
 alter table hb_seasons enable row level security;
 alter table hb_players enable row level security;
 alter table hb_player_season_stats enable row level security;
